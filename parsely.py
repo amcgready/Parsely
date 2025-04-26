@@ -15,8 +15,32 @@ load_dotenv()
 def get_env_flag(key, default="false"):
     return os.getenv(key, default).lower() == "true"
 
+def get_env_string(key, default=""):
+    return os.getenv(key, default)
+
 def update_env_variable(key, value):
     value = "true" if value else "false"
+    updated = False
+    lines = []
+
+    if os.path.exists(ENV_FILE):
+        with open(ENV_FILE, "r") as f:
+            for line in f:
+                if line.startswith(key + "="):
+                    lines.append(f"{key}={value}\n")
+                    updated = True
+                else:
+                    lines.append(line)
+    if not updated:
+        lines.append(f"{key}={value}\n")
+
+    with open(ENV_FILE, "w") as f:
+        f.writelines(lines)
+
+    # Refresh in current session
+    os.environ[key] = value
+
+def update_env_string(key, value):
     updated = False
     lines = []
 
@@ -194,8 +218,11 @@ def match_title_worker(title):
     return (title, result)
 
 def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, include_year=True):
-    file_history = scan_history.get(output_file, {})
-    existing_titles = load_titles_from_file(output_file)
+    # Use the helper function to get the full file path
+    full_output_path = get_output_filepath(output_file)
+    
+    # Check if the output file exists and load existing titles
+    existing_titles = load_titles_from_file(full_output_path)
 
     new_count = 0
     skipped_count = 0
@@ -227,7 +254,7 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
                 if completed % 10 == 0 or completed == total_titles:
                     print(f"⏳ Progress: {completed}/{total_titles} titles matched ({completed/total_titles:.1%})")
 
-    with open(output_file, "a", encoding="utf-8") as f:
+    with open(full_output_path, "a", encoding="utf-8") as f:
         for title in titles_to_write:
             if enable_tmdb:
                 result = tmdb_results.get(title, "[Error]")
@@ -235,24 +262,212 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
                 if isinstance(result, dict):
                     year = f" ({result['year']})" if include_year and result.get("year") else ""
                     f.write(f"{title}{year} [{result['id']}]\n")
-                    file_history[title] = {"tmdb_matched": enable_tmdb}
                 else:
                     f.write(f"{title} {result}\n")
-                    file_history[title] = {"tmdb_matched": enable_tmdb}
             else:
                 f.write(title + "\n")
-                file_history[title] = {"tmdb_matched": enable_tmdb}
 
             existing_titles.add(title)
             new_count += 1
 
-    scan_history[output_file] = file_history
+    scan_history[output_file] = {title: {"tmdb_matched": enable_tmdb} for title in titles_to_write}
     save_scan_history(scan_history)
     return new_count, skipped_count
+
+def get_output_filepath(filename):
+    """Generate a full file path using the configured root directory"""
+    root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
+    
+    # If filename already has a directory structure, preserve it under the root
+    rel_path = os.path.normpath(filename)
+    
+    # Join the root directory with the relative path
+    full_path = os.path.join(root_dir, rel_path)
+    
+    # Ensure the directory exists
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+    
+    return full_path
 
 def scrape_url_worker(url):
     print(f"🌐 Processing: {url}")
     return url, scrape_all_pages(url)
+
+def find_error_entries(filepath):
+    """Find all lines with [Error] in a file"""
+    if not os.path.exists(filepath):
+        return []
+    
+    error_entries = []
+    with open(filepath, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            if "[Error]" in line:
+                # Store the line number, original line, and just the title part
+                title = line.split("[Error]")[0].strip()
+                error_entries.append({"line_num": i, "line": line.strip(), "title": title})
+    
+    return error_entries
+
+def fix_error_entries(output_file):
+    """Interactively fix entries with errors in a file"""
+    # Use the helper function to get the full file path
+    full_output_path = get_output_filepath(output_file)
+    
+    if not os.path.exists(full_output_path):
+        print(f"❌ File '{output_file}' not found.")
+        return
+    
+    # Find all error entries
+    error_entries = find_error_entries(full_output_path)
+    
+    if not error_entries:
+        print(f"✅ No errors found in '{output_file}'.")
+        return
+    
+    print(f"🔍 Found {len(error_entries)} entries with errors in '{output_file}'.")
+    
+    # Read the entire file into memory
+    with open(full_output_path, "r", encoding="utf-8") as f:
+        all_lines = f.readlines()
+    
+    # Process each error entry
+    fixed_count = 0
+    for i, entry in enumerate(error_entries, 1):
+        print(f"\n{i}/{len(error_entries)}: {entry['line']}")
+        print("Options:")
+        print("1. Try to fix with TMDB search")
+        print("2. Skip this entry")
+        print("3. Skip all remaining entries")
+        
+        choice = input("Select an option (1-3): ").strip()
+        
+        if choice == "1":
+            search_term = input(f"Enter search term (default: '{entry['title']}'): ").strip()
+            if not search_term:
+                search_term = entry['title']
+                
+            print(f"🔍 Searching TMDB for '{search_term}'...")
+            result = match_title_with_tmdb(search_term)
+            
+            if isinstance(result, dict):
+                year = f" ({result['year']})" if result.get("year") else ""
+                new_line = f"{entry['title']}{year} [{result['id']}]\n"
+                
+                print(f"✅ Found match: {new_line.strip()}")
+                confirm = input("Apply this fix? (y/n): ").strip().lower()
+                
+                if confirm == "y":
+                    # Replace the line (account for 0-based indexing)
+                    all_lines[entry['line_num'] - 1] = new_line
+                    fixed_count += 1
+                    print("✅ Entry updated.")
+                else:
+                    print("⏩ Entry not changed.")
+            else:
+                print("❌ No match found in TMDB.")
+                manual_id = input("Enter TMDB ID manually (or leave blank to skip): ").strip()
+                if manual_id and manual_id.isdigit():
+                    new_line = f"{entry['title']} [{manual_id}]\n"
+                    all_lines[entry['line_num'] - 1] = new_line
+                    fixed_count += 1
+                    print("✅ Entry updated with manual ID.")
+                else:
+                    print("⏩ Entry not changed.")
+        
+        elif choice == "2":
+            print("⏩ Skipping this entry.")
+            continue
+            
+        elif choice == "3":
+            print("⏩ Skipping all remaining entries.")
+            break
+            
+        else:
+            print("❌ Invalid option, skipping this entry.")
+    
+    # Write the updated content back to the file
+    if fixed_count > 0:
+        with open(full_output_path, "w", encoding="utf-8") as f:
+            f.writelines(all_lines)
+        print(f"\n✅ Fixed {fixed_count} entries in '{output_file}'.")
+    else:
+        print("\n⚠️ No entries were changed.")
+
+def fix_errors_menu():
+    """Menu for fixing error entries in lists"""
+    while True:
+        clear_terminal()
+        print("🔧 Fix Errors in Lists")
+        print("1. Select file to fix")
+        print("2. Scan directory for files with errors")
+        print("3. Back to Main Menu")
+        
+        choice = input("\nSelect an option (1-3): ").strip()
+        
+        if choice == "1":
+            output_file = input("Enter the name of the file to fix: ").strip()
+            fix_error_entries(output_file)
+            input("\nPress Enter to continue...")
+            
+        elif choice == "2":
+            # Get root directory from settings
+            root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
+            print(f"🔍 Scanning directory: {root_dir}")
+            
+            # Find all text files
+            text_files = []
+            for root, dirs, files in os.walk(root_dir):
+                for file in files:
+                    if file.endswith(".txt"):
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, root_dir)
+                        text_files.append(rel_path)
+            
+            if not text_files:
+                print("❌ No text files found.")
+                input("Press Enter to continue...")
+                continue
+                
+            # Check each file for errors
+            files_with_errors = []
+            for file_path in text_files:
+                full_path = os.path.join(root_dir, file_path)
+                error_entries = find_error_entries(full_path)
+                if error_entries:
+                    files_with_errors.append({
+                        "path": file_path,
+                        "error_count": len(error_entries)
+                    })
+            
+            if not files_with_errors:
+                print("✅ No files with errors found.")
+                input("Press Enter to continue...")
+                continue
+                
+            # Display files with errors
+            print(f"\n📋 Found {len(files_with_errors)} files with errors:")
+            for i, file_info in enumerate(files_with_errors, 1):
+                print(f"{i}. {file_info['path']} ({file_info['error_count']} errors)")
+            
+            file_choice = input("\nEnter file number to fix (or 0 to cancel): ").strip()
+            try:
+                file_idx = int(file_choice) - 1
+                if file_idx == -1:
+                    continue
+                if 0 <= file_idx < len(files_with_errors):
+                    file_to_fix = files_with_errors[file_idx]['path']
+                    fix_error_entries(file_to_fix)
+                else:
+                    print("❌ Invalid file number.")
+                input("\nPress Enter to continue...")
+            except ValueError:
+                print("❌ Please enter a valid number.")
+                input("Press Enter to continue...")
+            
+        elif choice == "3":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to try again...")
 
 def run_batch_scraper():
     ENABLE_TMDB_MATCHING = get_env_flag("ENABLE_TMDB_MATCHING")
@@ -428,6 +643,7 @@ def show_settings():
         parallel_enabled = get_env_flag("ENABLE_PARALLEL_PROCESSING", "true")
         page_delay = float(os.getenv("PAGE_FETCH_DELAY", "0.5"))
         tmdb_workers = int(os.getenv("TMDB_MAX_WORKERS", "16"))
+        output_root = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
         
         print("⚙️ Current Settings:")
         print(f"1. TMDB Matching: {'ON' if tmdb_enabled else 'OFF'}")
@@ -435,11 +651,12 @@ def show_settings():
         print(f"3. Parallel Processing: {'ON' if parallel_enabled else 'OFF'}")
         print(f"4. Page Fetch Delay: {page_delay}s")
         print(f"5. TMDB Max Workers: {tmdb_workers}")
-        print("6. Clear history for a specific output file")
-        print("7. Clear ALL scan history")
-        print("8. Back to Main Menu")
-
-        choice = input("Select an option (1-8): ").strip()
+        print(f"6. Output Root Directory: {output_root}")
+        print("7. Clear history for a specific output file")
+        print("8. Clear ALL scan history")
+        print("9. Back to Main Menu")
+        
+        choice = input("Select an option (1-9): ").strip()
 
         if choice == "1":
             update_env_variable("ENABLE_TMDB_MATCHING", not tmdb_enabled)
@@ -494,11 +711,32 @@ def show_settings():
                 print("❌ Invalid input, please enter a number")
             input("Press Enter to continue...")
         elif choice == "6":
+            current_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
+            print(f"Current output directory: {current_dir}")
+            new_dir = input("Enter new output root directory (leave empty to keep current): ").strip()
+            
+            if new_dir:
+                # Check if directory exists, create if not
+                if not os.path.exists(new_dir):
+                    try:
+                        os.makedirs(new_dir)
+                        print(f"✅ Created directory: {new_dir}")
+                    except Exception as e:
+                        print(f"❌ Could not create directory: {str(e)}")
+                        input("Press Enter to continue...")
+                        continue
+                
+                # Update the setting
+                update_env_string("OUTPUT_ROOT_DIR", new_dir)
+                print(f"✅ Output directory set to: {new_dir}")
+            
+            input("Press Enter to continue...")
+        elif choice == "7":
             filename = input("Enter the output filename to clear its history: ").strip()
             clear_history("file", filename)
             print(f"✅ History for '{filename}' cleared.")
             input("Press Enter to return...")
-        elif choice == "7":
+        elif choice == "8":
             confirm = input("⚠️ This will erase ALL scan history. Type 'yes' to confirm: ").strip().lower()
             if confirm == "yes":
                 clear_history("all")
@@ -506,7 +744,7 @@ def show_settings():
             else:
                 print("❌ Cancelled.")
             input("Press Enter to return...")
-        elif choice == "8":
+        elif choice == "9":
             break
         else:
             input("❌ Invalid option. Press Enter to try again...")
@@ -836,7 +1074,6 @@ def check_monitored_urls(monitor_config, scan_history, enable_tmdb=True, include
         output_file = entry["output_file"]
         
         try:
-            print(f"\n🌐 Checking: {url}")
             titles = scrape_all_pages(url)
             
             if titles:
@@ -845,7 +1082,6 @@ def check_monitored_urls(monitor_config, scan_history, enable_tmdb=True, include
                     enable_tmdb, include_year
                 )
                 
-                # Update last check time
                 entry["last_check"] = time.time()
                 
                 print(f"✅ Added {new_count} new titles to '{output_file}'")
@@ -890,10 +1126,11 @@ def main_menu():
         print("1. Run Scraper (Single URL)")
         print("2. Batch Scraper (Multiple URLs)")
         print("3. Monitor Scraper")
-        print("4. Settings")
-        print("5. Exit")
+        print("4. Fix Errors in Lists")  # New option
+        print("5. Settings")
+        print("6. Exit")  # Updated number
 
-        choice = input("\nChoose an option (1-5): ").strip()
+        choice = input("\nChoose an option (1-6): ").strip()  # Updated number
 
         if choice == "1":
             run_scraper()
@@ -901,9 +1138,11 @@ def main_menu():
             run_batch_scraper()
         elif choice == "3":
             run_monitor_scraper()
-        elif choice == "4":
+        elif choice == "4":  # New option
+            fix_errors_menu()
+        elif choice == "5":  # Updated number
             show_settings()
-        elif choice == "5":
+        elif choice == "6":  # Updated number
             print("👋 Exiting.")
             break
         else:
