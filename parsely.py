@@ -469,6 +469,201 @@ def fix_errors_menu():
         else:
             input("❌ Invalid option. Press Enter to try again...")
 
+def find_duplicate_entries(filepath):
+    """Find all duplicate titles in a file"""
+    if not os.path.exists(filepath):
+        return []
+    
+    # Dictionary to track title occurrences and their line numbers
+    title_occurrences = {}
+    
+    with open(filepath, "r", encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            # Extract just the title part (before any "[" or "->")
+            title = line.split("->")[0].split("[")[0].strip()
+            if title:
+                if title in title_occurrences:
+                    title_occurrences[title].append({"line_num": i, "full_line": line.strip()})
+                else:
+                    title_occurrences[title] = [{"line_num": i, "full_line": line.strip()}]
+    
+    # Filter to only titles with multiple occurrences
+    duplicates = {title: occurrences for title, occurrences in title_occurrences.items() 
+                 if len(occurrences) > 1}
+    
+    return duplicates
+
+def manage_duplicates(output_file):
+    """Manage duplicate entries in a file"""
+    # Use the helper function to get the full file path
+    full_output_path = get_output_filepath(output_file)
+    
+    if not os.path.exists(full_output_path):
+        print(f"❌ File '{output_file}' not found.")
+        return
+    
+    # Find all duplicate entries
+    duplicates = find_duplicate_entries(full_output_path)
+    
+    if not duplicates:
+        print(f"✅ No duplicate titles found in '{output_file}'.")
+        return
+    
+    print(f"🔍 Found {len(duplicates)} titles with duplicates in '{output_file}'.")
+    
+    # Read the entire file into memory
+    with open(full_output_path, "r", encoding="utf-8") as f:
+        all_lines = f.readlines()
+    
+    # Process each duplicate title
+    removed_count = 0
+    for i, (title, occurrences) in enumerate(duplicates.items(), 1):
+        print(f"\n{i}/{len(duplicates)}: Title: '{title}'")
+        print("Occurrences:")
+        for j, entry in enumerate(occurrences, 1):
+            print(f"  {j}. Line {entry['line_num']}: {entry['full_line']}")
+        
+        print("\nOptions:")
+        print("1. Keep first occurrence, remove others (default - press Enter)")
+        print("2. Keep specific occurrence, remove others")
+        print("3. Keep all occurrences")
+        print("4. Skip this title")
+        print("5. Skip all remaining titles")
+        
+        choice = input("Select an option (1-5): ").strip()
+        
+        # If user just pressed Enter, default to option 1
+        if choice == "":
+            choice = "1"
+        
+        if choice == "1":
+            # Keep the first occurrence, remove others
+            for entry in occurrences[1:]:
+                # Mark lines for removal (we'll use None as a marker)
+                # Use 0-based indexing for all_lines
+                all_lines[entry["line_num"] - 1] = None
+                removed_count += 1
+            print(f"✅ Kept first occurrence, removed {len(occurrences)-1} duplicate(s).")
+            
+        elif choice == "2":
+            # Let user choose which occurrence to keep
+            keep_idx = input(f"Enter occurrence number to keep (1-{len(occurrences)}): ").strip()
+            try:
+                keep_idx = int(keep_idx) - 1  # Convert to 0-based
+                if 0 <= keep_idx < len(occurrences):
+                    for j, entry in enumerate(occurrences):
+                        if j != keep_idx:  # Remove all except the selected one
+                            all_lines[entry["line_num"] - 1] = None
+                            removed_count += 1
+                    print(f"✅ Kept occurrence #{keep_idx+1}, removed {len(occurrences)-1} duplicate(s).")
+                else:
+                    print("❌ Invalid occurrence number. No changes made.")
+            except ValueError:
+                print("❌ Invalid input. No changes made.")
+                
+        elif choice == "3":
+            # Keep all occurrences
+            print("✅ Kept all occurrences of this title.")
+            
+        elif choice == "4":
+            # Skip this title
+            print("⏩ Skipping this title.")
+            
+        elif choice == "5":
+            # Skip all remaining titles
+            print("⏩ Skipping all remaining titles.")
+            break
+            
+        else:
+            print("❌ Invalid option, skipping this title.")
+    
+    # Remove the None entries (marked for deletion) and write back to file
+    if removed_count > 0:
+        new_lines = [line for line in all_lines if line is not None]
+        with open(full_output_path, "w", encoding="utf-8") as f:
+            f.writelines(new_lines)
+        print(f"\n✅ Removed {removed_count} duplicate entries from '{output_file}'.")
+    else:
+        print("\n⚠️ No entries were removed.")
+
+def duplicates_menu():
+    """Menu for managing duplicate entries in lists"""
+    while True:
+        clear_terminal()
+        print("🔍 Manage Duplicates in Lists")
+        print("1. Select file to check for duplicates")
+        print("2. Scan directory for files with duplicates")
+        print("3. Back to Main Menu")
+        
+        choice = input("\nSelect an option (1-3): ").strip()
+        
+        if choice == "1":
+            output_file = input("Enter the name of the file to check: ").strip()
+            manage_duplicates(output_file)
+            input("\nPress Enter to continue...")
+            
+        elif choice == "2":
+            # Get root directory from settings
+            root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
+            print(f"🔍 Scanning directory: {root_dir}")
+            
+            # Find all text files
+            text_files = []
+            for root, dirs, files in os.walk(root_dir):
+                for file in files:
+                    if file.endswith(".txt"):
+                        full_path = os.path.join(root, file)
+                        rel_path = os.path.relpath(full_path, root_dir)
+                        text_files.append(rel_path)
+            
+            if not text_files:
+                print("❌ No text files found.")
+                input("Press Enter to continue...")
+                continue
+                
+            # Check each file for duplicates
+            files_with_duplicates = []
+            for file_path in text_files:
+                full_path = os.path.join(root_dir, file_path)
+                duplicates = find_duplicate_entries(full_path)
+                if duplicates:
+                    files_with_duplicates.append({
+                        "path": file_path,
+                        "dup_count": len(duplicates),
+                        "total_dupes": sum(len(occurrences) for occurrences in duplicates.values()) - len(duplicates)
+                    })
+            
+            if not files_with_duplicates:
+                print("✅ No files with duplicate entries found.")
+                input("Press Enter to continue...")
+                continue
+                
+            # Display files with duplicates
+            print(f"\n📋 Found {len(files_with_duplicates)} files with duplicates:")
+            for i, file_info in enumerate(files_with_duplicates, 1):
+                print(f"{i}. {file_info['path']} " +
+                      f"({file_info['dup_count']} titles with {file_info['total_dupes']} duplicate entries)")
+            
+            file_choice = input("\nEnter file number to manage (or 0 to cancel): ").strip()
+            try:
+                file_idx = int(file_choice) - 1
+                if file_idx == -1:
+                    continue
+                if 0 <= file_idx < len(files_with_duplicates):
+                    file_to_fix = files_with_duplicates[file_idx]['path']
+                    manage_duplicates(file_to_fix)
+                else:
+                    print("❌ Invalid file number.")
+                input("\nPress Enter to continue...")
+            except ValueError:
+                print("❌ Please enter a valid number.")
+                input("Press Enter to continue...")
+            
+        elif choice == "3":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to try again...")
+
 def run_batch_scraper():
     ENABLE_TMDB_MATCHING = get_env_flag("ENABLE_TMDB_MATCHING")
     INCLUDE_YEAR = get_env_flag("INCLUDE_YEAR")
@@ -749,376 +944,6 @@ def show_settings():
         else:
             input("❌ Invalid option. Press Enter to try again...")
 
-def run_monitor_scraper():
-    """Set up URLs to be monitored for changes every 24 hours"""
-    ENABLE_TMDB_MATCHING = get_env_flag("ENABLE_TMDB_MATCHING")
-    INCLUDE_YEAR = get_env_flag("INCLUDE_YEAR")
-    scan_history = load_scan_history()
-    
-    # Initialize monitor config if it doesn't exist
-    monitor_config_file = "monitor_config.json"
-    if os.path.exists(monitor_config_file):
-        with open(monitor_config_file, 'r', encoding='utf-8') as f:
-            monitor_config = json.load(f)
-    else:
-        monitor_config = {"urls": [], "last_run": None}
-    
-    while True:  # Add loop to return to this menu after operations
-        clear_terminal()
-        print("🔍 Monitor Scraper Mode")
-        print("Current monitored URLs:")
-        
-        if not monitor_config["urls"]:
-            print("  No URLs currently monitored.")
-        else:
-            for i, entry in enumerate(monitor_config["urls"], 1):
-                # Show last check time if available
-                last_check = "Never" if not entry.get("last_check") else time.strftime(
-                    "%Y-%m-%d %H:%M", time.localtime(entry["last_check"]))
-                print(f"  {i}. {entry['url']} -> {entry['output_file']} (Last checked: {last_check})")
-        
-        # Get current cron schedule if available
-        try:
-            from subprocess import run, PIPE
-            crontab = run(["crontab", "-l"], stdout=PIPE, text=True).stdout
-            cron_entries = [line for line in crontab.splitlines() if "--monitor-check" in line]
-            if cron_entries:
-                print("\nCurrent schedule:")
-                for entry in cron_entries:
-                    schedule = " ".join(entry.split()[:5])
-                    print(f"  {schedule}")
-            else:
-                print("\nNo automatic schedule configured.")
-        except:
-            print("\nCould not determine current schedule.")
-        
-        print("\nOptions:")
-        print("1. Add URL to monitor")
-        print("2. Remove URL from monitor")
-        print("3. Run monitor check now")
-        print("4. Configure monitor schedule")
-        print("5. Back to Main Menu")
-        
-        choice = input("\nSelect an option (1-5): ").strip()
-        
-        if choice == "1":
-            url = input("🌐 Enter the MDBList URL to monitor: ").strip()
-            output_file = input("📝 Enter the name of the output file (with .txt extension): ").strip()
-            
-            # Add to monitor config
-            monitor_config["urls"].append({
-                "url": url,
-                "output_file": output_file,
-                "last_check": None
-            })
-            
-            with open(monitor_config_file, 'w', encoding='utf-8') as f:
-                json.dump(monitor_config, f, indent=2)
-            
-            print(f"✅ URL added to monitor list.")
-            input("Press Enter to continue...")
-            
-        elif choice == "2":
-            if not monitor_config["urls"]:
-                print("❌ No URLs to remove.")
-                input("Press Enter to continue...")
-            else:
-                try:
-                    idx = int(input("Enter the number of the URL to remove: ").strip()) - 1
-                    if 0 <= idx < len(monitor_config["urls"]):
-                        removed = monitor_config["urls"].pop(idx)
-                        with open(monitor_config_file, 'w', encoding='utf-8') as f:
-                            json.dump(monitor_config, f, indent=2)
-                        print(f"✅ Removed URL: {removed['url']}")
-                    else:
-                        print("❌ Invalid number.")
-                    input("Press Enter to continue...")
-                except ValueError:
-                    print("❌ Please enter a valid number.")
-                    input("Press Enter to continue...")
-        
-        elif choice == "3":
-            if not monitor_config["urls"]:
-                print("❌ No URLs to check.")
-                input("Press Enter to continue...")
-            else:
-                check_monitored_urls(monitor_config, scan_history, ENABLE_TMDB_MATCHING, INCLUDE_YEAR)
-                # Update last run time
-                monitor_config["last_run"] = time.time()
-                with open(monitor_config_file, 'w', encoding='utf-8') as f:
-                    json.dump(monitor_config, f, indent=2)
-                input("Press Enter to continue...")
-        
-        elif choice == "4":
-            configure_monitor_schedule()
-        
-        elif choice == "5":
-            break
-        else:
-            print("❌ Invalid option.")
-            input("Press Enter to try again...")
-
-def configure_monitor_schedule():
-    """Configure the automatic monitor schedule"""
-    clear_terminal()
-    print("📅 Configure Monitor Schedule")
-    print("\nCurrent monitoring schedule options:")
-    print("1. Daily at midnight")
-    print("2. Daily at specific time")
-    print("3. Every X hours")
-    print("4. Every X days")  # New option
-    print("5. Weekly on specific day")
-    print("6. Custom cron expression")
-    print("7. Remove scheduled monitoring")
-    print("8. Back")  # Updated number
-    
-    choice = input("\nSelect an option (1-8): ").strip()  # Updated number
-    
-    script_path = os.path.abspath(__file__)
-    script_dir = os.path.dirname(script_path)
-    script_name = os.path.basename(script_path)
-    command = f"cd {script_dir} && python3 '{script_name}' --monitor-check"
-    
-    # Try to detect system type and scheduling capabilities
-    is_windows = os.name == "nt"
-    
-    # Initialize cron settings
-    cron_time = None
-    cron_command = ""
-    
-    if choice == "1":  # Daily at midnight
-        cron_time = "0 0 * * *"
-        print("✅ Setting up daily monitoring at midnight")
-        
-    elif choice == "2":  # Daily at specific time
-        while True:
-            hour = input("Enter hour (0-23): ").strip()
-            minute = input("Enter minute (0-59): ").strip()
-            try:
-                h = int(hour)
-                m = int(minute)
-                if 0 <= h < 24 and 0 <= m < 60:
-                    cron_time = f"{m} {h} * * *"
-                    print(f"✅ Setting up daily monitoring at {h:02d}:{m:02d}")
-                    break
-                else:
-                    print("❌ Invalid time. Please try again.")
-            except ValueError:
-                print("❌ Please enter valid numbers.")
-                
-    elif choice == "3":  # Every X hours
-        while True:
-            interval = input("Enter interval in hours (1-24): ").strip()
-            try:
-                h = int(interval)
-                if 1 <= h <= 24 and 24 % h == 0:  # Ensure it divides evenly into a day
-                    cron_time = f"0 */{h} * * *"
-                    print(f"✅ Setting up monitoring every {h} hours")
-                    break
-                else:
-                    print("❌ Please enter a number between 1-24 that divides evenly into 24.")
-            except ValueError:
-                print("❌ Please enter a valid number.")
-    
-    elif choice == "4":  # Every X days (new option)
-        while True:
-            interval = input("Enter interval in days (1-30): ").strip()
-            hour = input("Enter hour of day to run (0-23): ").strip()
-            try:
-                d = int(interval)
-                h = int(hour)
-                if 1 <= d <= 30 and 0 <= h < 24:
-                    # For "every X days" we use the day of month with modulo
-                    cron_time = f"0 {h} */{d} * *"
-                    print(f"✅ Setting up monitoring every {d} days at {h:02d}:00")
-                    break
-                else:
-                    print("❌ Invalid input. Day interval must be 1-30 and hour must be 0-23.")
-            except ValueError:
-                print("❌ Please enter valid numbers.")
-                
-    elif choice == "5":  # Weekly on specific day (was 4 before)
-        days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        print("Days of week:")
-        for i, day in enumerate(days):
-            print(f"{i}: {day}")
-            
-        while True:
-            day = input("Enter day number (0-6): ").strip()
-            hour = input("Enter hour (0-23): ").strip()
-            try:
-                d = int(day)
-                h = int(hour)
-                if 0 <= d <= 6 and 0 <= h < 24:
-                    cron_time = f"0 {h} * * {d}"
-                    print(f"✅ Setting up weekly monitoring on {days[d]} at {h:02d}:00")
-                    break
-                else:
-                    print("❌ Invalid input. Please try again.")
-            except ValueError:
-                print("❌ Please enter valid numbers.")
-                
-    elif choice == "6":  # Custom cron expression (was 5 before)
-        print("Enter a custom cron expression (minute hour day month weekday):")
-        print("Example: '0 3 * * *' runs at 3:00 AM every day")
-        cron_time = input("Cron expression: ").strip()
-        print(f"✅ Setting up monitoring with custom schedule: {cron_time}")
-        
-    elif choice == "7":  # Remove scheduled monitoring (was 6 before)
-        print("✅ Removing scheduled monitoring")
-        # No need to set cron_time, we'll just update the crontab without the monitor line
-        
-    elif choice == "8":  # Back (was 7 before)
-        return
-    else:
-        print("❌ Invalid option.")
-        input("Press Enter to return...")
-        return
-    
-    # Create scheduling instructions based on system type
-    if is_windows:
-        # Windows scheduling instructions
-        print("\n📝 To set up automatic monitoring on Windows:")
-        print("1. Open Task Scheduler")
-        print("2. Create a Basic Task")
-        print(f"3. Set the trigger based on your selection: {cron_time}")
-        print("4. For the Action, select 'Start a Program'")
-        print(f"5. Program/script: python3 or python")
-        print(f"6. Add arguments: \"{script_path}\" --monitor-check")
-        print(f"7. Start in: {script_dir}")
-    else:
-        # Unix/Linux scheduling instructions
-        cron_command = f"{cron_time} {command}"
-        
-        # Try to create a crontab example file for the user
-        crontab_example = os.path.join(script_dir, "monitor_crontab.txt")
-        try:
-            with open(crontab_example, 'w') as f:
-                f.write(f"# Monitor schedule for Parsely\n{cron_command}\n")
-            print(f"\n✅ Created crontab example file at: {crontab_example}")
-        except Exception as e:
-            print(f"\n❌ Could not create example file: {str(e)}")
-        
-        print("\n📝 To set up automatic monitoring on Linux/Unix:")
-        print("1. Run 'crontab -e' to edit your crontab")
-        print(f"2. Add this line: {cron_command}")
-        print("3. Save and exit")
-        
-        # Try to update crontab directly but handle failures gracefully
-        if cron_time:  # Only if we're setting a schedule (not removing)
-            try:
-                from subprocess import run, PIPE
-                
-                # First check if crontab is available
-                check_result = run(["which", "crontab"], stdout=PIPE, stderr=PIPE, text=True)
-                
-                if check_result.returncode == 0:
-                    # Get current crontab
-                    current_crontab = run(["crontab", "-l"], stdout=PIPE, stderr=PIPE, text=True)
-                    
-                    # Only proceed if getting current crontab was successful
-                    if current_crontab.returncode == 0:
-                        lines = [line for line in current_crontab.stdout.splitlines() 
-                                if "--monitor-check" not in line and line.strip()]
-                        
-                        # Add our new command
-                        if cron_time:
-                            lines.append(cron_command)
-                        
-                        # Write to a temporary file
-                        from tempfile import NamedTemporaryFile
-                        temp = NamedTemporaryFile(delete=False)
-                        try:
-                            with open(temp.name, 'w') as f:
-                                f.write("\n".join(lines) + "\n")
-                            
-                            # Update crontab
-                            result = run(["crontab", temp.name], stderr=PIPE, text=True)
-                            if result.returncode == 0:
-                                print("✅ Crontab updated successfully!")
-                            else:
-                                print(f"⚠️ Could not update crontab automatically: {result.stderr}")
-                                
-                        except Exception as e:
-                            print(f"⚠️ Error creating temporary file: {str(e)}")
-                        finally:
-                            if os.path.exists(temp.name):
-                                os.unlink(temp.name)
-                    else:
-                        print("⚠️ Could not read current crontab. You'll need to update it manually.")
-                else:
-                    print("⚠️ Crontab command not found. You'll need to set up scheduling manually.")
-                    
-            except Exception as e:
-                print(f"⚠️ Could not set up automatic scheduling: {str(e)}")
-    
-    # Always create a monitor-check.sh script as an alternative method
-    try:
-        script_path = os.path.join(script_dir, "monitor-check.sh")
-        with open(script_path, 'w') as f:
-            f.write(f"#!/bin/bash\ncd {script_dir}\npython3 '{script_name}' --monitor-check\n")
-        os.chmod(script_path, 0o755)  # Make executable
-        print(f"\n✅ Created executable script at: {script_path}")
-        print("You can run this script manually or add it to your own scheduler")
-    except Exception as e:
-        print(f"\n❌ Could not create executable script: {str(e)}")
-    
-    input("\nPress Enter to return to the monitor menu...")
-
-def check_monitored_urls(monitor_config, scan_history, enable_tmdb=True, include_year=True):
-    """Check all monitored URLs for new content"""
-    print(f"🔍 Checking {len(monitor_config['urls'])} monitored URLs...")
-    
-    for entry in monitor_config["urls"]:
-        url = entry["url"]
-        output_file = entry["output_file"]
-        
-        try:
-            titles = scrape_all_pages(url)
-            
-            if titles:
-                new_count, skipped_count = process_scrape_results(
-                    titles, output_file, scan_history, 
-                    enable_tmdb, include_year
-                )
-                
-                entry["last_check"] = time.time()
-                
-                print(f"✅ Added {new_count} new titles to '{output_file}'")
-                if skipped_count > 0:
-                    print(f"⏩ Skipped {skipped_count} titles already in '{output_file}'")
-            else:
-                print(f"⚠️ No titles found for {url}")
-        except Exception as e:
-            print(f"❌ Error checking {url}: {str(e)}")
-    
-    # Save updated monitor config
-    with open("monitor_config.json", 'w', encoding='utf-8') as f:
-        json.dump(monitor_config, f, indent=2)
-
-def run_monitor_check():
-    """Run monitor check from command line"""
-    print("🔄 Running scheduled monitor check...")
-    ENABLE_TMDB_MATCHING = get_env_flag("ENABLE_TMDB_MATCHING")
-    INCLUDE_YEAR = get_env_flag("INCLUDE_YEAR")
-    scan_history = load_scan_history()
-    
-    monitor_config_file = "monitor_config.json"
-    if not os.path.exists(monitor_config_file):
-        print("❌ Monitor configuration not found.")
-        return
-    
-    with open(monitor_config_file, 'r', encoding='utf-8') as f:
-        monitor_config = json.load(f)
-    
-    check_monitored_urls(monitor_config, scan_history, ENABLE_TMDB_MATCHING, INCLUDE_YEAR)
-    monitor_config["last_run"] = time.time()
-    
-    with open(monitor_config_file, 'w', encoding='utf-8') as f:
-        json.dump(monitor_config, f, indent=2)
-    
-    print("✅ Monitor check complete.")
-
 def main_menu():
     while True:
         clear_terminal()
@@ -1126,11 +951,12 @@ def main_menu():
         print("1. Run Scraper (Single URL)")
         print("2. Batch Scraper (Multiple URLs)")
         print("3. Monitor Scraper")
-        print("4. Fix Errors in Lists")  # New option
-        print("5. Settings")
-        print("6. Exit")  # Updated number
+        print("4. Fix Errors in Lists")
+        print("5. Manage Duplicates in Lists")  # New option
+        print("6. Settings")
+        print("7. Exit")
 
-        choice = input("\nChoose an option (1-6): ").strip()  # Updated number
+        choice = input("\nChoose an option (1-7): ").strip()
 
         if choice == "1":
             run_scraper()
@@ -1138,11 +964,13 @@ def main_menu():
             run_batch_scraper()
         elif choice == "3":
             run_monitor_scraper()
-        elif choice == "4":  # New option
+        elif choice == "4":
             fix_errors_menu()
-        elif choice == "5":  # Updated number
+        elif choice == "5":  # New option
+            duplicates_menu()
+        elif choice == "6":
             show_settings()
-        elif choice == "6":  # Updated number
+        elif choice == "7":
             print("👋 Exiting.")
             break
         else:
