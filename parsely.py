@@ -829,7 +829,7 @@ def run_scraper():
 
     while True:
         clear_terminal()
-        url = input("🌐 Enter the MDBList URL to scrape: ").strip()
+        url = input("🌐 Enter the list URL to scrape: ").strip()
         output_file = input("📝 Enter the name of the output file (with .txt extension): ").strip()
 
         titles = scrape_all_pages(url)
