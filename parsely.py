@@ -301,6 +301,7 @@ def find_error_entries(filepath):
     error_entries = []
     with open(filepath, "r", encoding="utf-8") as f:
         for i, line in enumerate(f, 1):
+            # Look specifically for [Error] at the end of a line
             if "[Error]" in line:
                 # Store the line number, original line, and just the title part
                 title = line.split("[Error]")[0].strip()
@@ -414,30 +415,34 @@ def fix_errors_menu():
             root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
             print(f"🔍 Scanning directory: {root_dir}")
             
-            # Find all text files
-            text_files = []
-            for root, dirs, files in os.walk(root_dir):
-                for file in files:
-                    if file.endswith(".txt"):
-                        full_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(full_path, root_dir)
-                        text_files.append(rel_path)
+            # Find only list files using the new function
+            list_files = scan_for_list_files(root_dir)
             
-            if not text_files:
-                print("❌ No text files found.")
+            if not list_files:
+                print("❌ No list files found.")
                 input("Press Enter to continue...")
                 continue
-                
+            
+            print(f"📋 Found {len(list_files)} list files. Scanning for errors...")
+            
             # Check each file for errors
             files_with_errors = []
-            for file_path in text_files:
-                full_path = os.path.join(root_dir, file_path)
-                error_entries = find_error_entries(full_path)
-                if error_entries:
-                    files_with_errors.append({
-                        "path": file_path,
-                        "error_count": len(error_entries)
-                    })
+            for file_path in list_files:
+                try:
+                    full_path = os.path.join(root_dir, file_path)
+                    print(f"Checking: {file_path}", end="\r")  # Show progress
+                    error_entries = find_error_entries(full_path)
+                    if error_entries:
+                        files_with_errors.append({
+                            "path": file_path,
+                            "error_count": len(error_entries)
+                        })
+                        print(f"✅ Found {len(error_entries)} errors in {file_path}        ")
+                except Exception as e:
+                    print(f"❌ Error scanning {file_path}: {str(e)}")
+            
+            # Clear the progress line
+            print(" " * 80, end="\r")
             
             if not files_with_errors:
                 print("✅ No files with errors found.")
@@ -472,20 +477,32 @@ def fix_errors_menu():
 def find_duplicate_entries(filepath):
     """Find all duplicate titles in a file"""
     if not os.path.exists(filepath):
-        return []
+        return {}
     
     # Dictionary to track title occurrences and their line numbers
     title_occurrences = {}
     
-    with open(filepath, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f, 1):
-            # Extract just the title part (before any "[" or "->")
-            title = line.split("->")[0].split("[")[0].strip()
-            if title:
-                if title in title_occurrences:
-                    title_occurrences[title].append({"line_num": i, "full_line": line.strip()})
-                else:
-                    title_occurrences[title] = [{"line_num": i, "full_line": line.strip()}]
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                # Skip empty lines
+                if not line.strip():
+                    continue
+                    
+                # Extract just the title part (before any "[" or "->")
+                # Handle potential formatting issues gracefully
+                try:
+                    title = line.split("->")[0].split("[")[0].strip()
+                    if title:
+                        if title in title_occurrences:
+                            title_occurrences[title].append({"line_num": i, "full_line": line.strip()})
+                        else:
+                            title_occurrences[title] = [{"line_num": i, "full_line": line.strip()}]
+                except Exception:
+                    continue  # Skip problematic lines
+    except Exception as e:
+        print(f"❌ Error reading file {filepath}: {str(e)}")
+        return {}
     
     # Filter to only titles with multiple occurrences
     duplicates = {title: occurrences for title, occurrences in title_occurrences.items() 
@@ -493,98 +510,92 @@ def find_duplicate_entries(filepath):
     
     return duplicates
 
-def manage_duplicates(output_file):
-    """Manage duplicate entries in a file"""
-    # Use the helper function to get the full file path
-    full_output_path = get_output_filepath(output_file)
-    
-    if not os.path.exists(full_output_path):
-        print(f"❌ File '{output_file}' not found.")
-        return
-    
-    # Find all duplicate entries
-    duplicates = find_duplicate_entries(full_output_path)
-    
-    if not duplicates:
-        print(f"✅ No duplicate titles found in '{output_file}'.")
-        return
-    
-    print(f"🔍 Found {len(duplicates)} titles with duplicates in '{output_file}'.")
-    
-    # Read the entire file into memory
-    with open(full_output_path, "r", encoding="utf-8") as f:
-        all_lines = f.readlines()
-    
-    # Process each duplicate title
-    removed_count = 0
-    for i, (title, occurrences) in enumerate(duplicates.items(), 1):
-        print(f"\n{i}/{len(duplicates)}: Title: '{title}'")
-        print("Occurrences:")
-        for j, entry in enumerate(occurrences, 1):
-            print(f"  {j}. Line {entry['line_num']}: {entry['full_line']}")
+def scan_for_text_files(root_dir):
+    """Scan for both .txt files and possible text files without extensions"""
+    text_files = []
+    try:
+        for root, dirs, files in os.walk(root_dir):
+            for file in files:
+                full_path = os.path.join(root, file)
+                # Skip obviously non-text files by extension
+                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mkv', '.exe', '.zip', '.tar.gz')):
+                    continue
+                    
+                # Check if file is readable
+                if os.access(full_path, os.R_OK):
+                    try:
+                        # Try to read the first few lines to check if it's text
+                        is_text = True
+                        with open(full_path, 'rb') as f:
+                            try:
+                                sample = f.read(1024)  # Read first 1KB
+                                # Try to decode as text
+                                sample.decode('utf-8')
+                            except UnicodeDecodeError:
+                                is_text = False
+                                
+                        if is_text:
+                            rel_path = os.path.relpath(full_path, root_dir)
+                            text_files.append(rel_path)
+                            print(f"Found: {rel_path}")  # Debug output
+                    except Exception:
+                        # Skip files we can't read
+                        continue
+    except Exception as e:
+        print(f"❌ Error scanning directory: {str(e)}")
         
-        print("\nOptions:")
-        print("1. Keep first occurrence, remove others (default - press Enter)")
-        print("2. Keep specific occurrence, remove others")
-        print("3. Keep all occurrences")
-        print("4. Skip this title")
-        print("5. Skip all remaining titles")
-        
-        choice = input("Select an option (1-5): ").strip()
-        
-        # If user just pressed Enter, default to option 1
-        if choice == "":
-            choice = "1"
-        
-        if choice == "1":
-            # Keep the first occurrence, remove others
-            for entry in occurrences[1:]:
-                # Mark lines for removal (we'll use None as a marker)
-                # Use 0-based indexing for all_lines
-                all_lines[entry["line_num"] - 1] = None
-                removed_count += 1
-            print(f"✅ Kept first occurrence, removed {len(occurrences)-1} duplicate(s).")
+    return text_files
+
+def scan_for_list_files(root_dir):
+    """Scan for only files that are likely movie/TV show lists"""
+    list_files = []
+    ignored_dirs = {'.git', '__pycache__', 'node_modules'}
+    ignored_extensions = {'.py', '.json', '.yml', '.yaml', '.md', '.gitignore', 
+                         '.env', '.env.template', '.dockerignore'}
+    
+    try:
+        for root, dirs, files in os.walk(root_dir):
+            # Skip ignored directories
+            dirs[:] = [d for d in dirs if d not in ignored_dirs]
             
-        elif choice == "2":
-            # Let user choose which occurrence to keep
-            keep_idx = input(f"Enter occurrence number to keep (1-{len(occurrences)}): ").strip()
-            try:
-                keep_idx = int(keep_idx) - 1  # Convert to 0-based
-                if 0 <= keep_idx < len(occurrences):
-                    for j, entry in enumerate(occurrences):
-                        if j != keep_idx:  # Remove all except the selected one
-                            all_lines[entry["line_num"] - 1] = None
-                            removed_count += 1
-                    print(f"✅ Kept occurrence #{keep_idx+1}, removed {len(occurrences)-1} duplicate(s).")
-                else:
-                    print("❌ Invalid occurrence number. No changes made.")
-            except ValueError:
-                print("❌ Invalid input. No changes made.")
+            for file in files:
+                # Skip files with ignored extensions
+                _, ext = os.path.splitext(file.lower())
+                if ext in ignored_extensions:
+                    continue
                 
-        elif choice == "3":
-            # Keep all occurrences
-            print("✅ Kept all occurrences of this title.")
-            
-        elif choice == "4":
-            # Skip this title
-            print("⏩ Skipping this title.")
-            
-        elif choice == "5":
-            # Skip all remaining titles
-            print("⏩ Skipping all remaining titles.")
-            break
-            
-        else:
-            print("❌ Invalid option, skipping this title.")
-    
-    # Remove the None entries (marked for deletion) and write back to file
-    if removed_count > 0:
-        new_lines = [line for line in all_lines if line is not None]
-        with open(full_output_path, "w", encoding="utf-8") as f:
-            f.writelines(new_lines)
-        print(f"\n✅ Removed {removed_count} duplicate entries from '{output_file}'.")
-    else:
-        print("\n⚠️ No entries were removed.")
+                full_path = os.path.join(root, file)
+                
+                # Check if file is readable
+                if os.access(full_path, os.R_OK):
+                    try:
+                        # Try to read the first few lines to check if it looks like a movie list
+                        is_list_file = False
+                        with open(full_path, 'r', encoding='utf-8') as f:
+                            # Try to read first 5 lines
+                            for _ in range(5):
+                                line = f.readline().strip()
+                                if line and (
+                                    # Look for patterns that suggest movie/TV lists
+                                    '[' in line or 
+                                    '->' in line or
+                                    '(' in line and ')' in line or  # Year in parentheses
+                                    'Error' in line
+                                ):
+                                    is_list_file = True
+                                    break
+                        
+                        if is_list_file:
+                            rel_path = os.path.relpath(full_path, root_dir)
+                            list_files.append(rel_path)
+                            print(f"Found list file: {rel_path}")
+                    except Exception:
+                        # Skip files we can't read or that have encoding issues
+                        continue
+    except Exception as e:
+        print(f"❌ Error scanning directory: {str(e)}")
+        
+    return list_files
 
 def duplicates_menu():
     """Menu for managing duplicate entries in lists"""
@@ -607,31 +618,36 @@ def duplicates_menu():
             root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
             print(f"🔍 Scanning directory: {root_dir}")
             
-            # Find all text files
-            text_files = []
-            for root, dirs, files in os.walk(root_dir):
-                for file in files:
-                    if file.endswith(".txt"):
-                        full_path = os.path.join(root, file)
-                        rel_path = os.path.relpath(full_path, root_dir)
-                        text_files.append(rel_path)
+            # Find only list files using the new function
+            list_files = scan_for_list_files(root_dir)
             
-            if not text_files:
-                print("❌ No text files found.")
+            if not list_files:
+                print("❌ No list files found.")
                 input("Press Enter to continue...")
                 continue
-                
+            
+            print(f"📋 Found {len(list_files)} list files. Scanning for duplicates...")
+            
             # Check each file for duplicates
             files_with_duplicates = []
-            for file_path in text_files:
-                full_path = os.path.join(root_dir, file_path)
-                duplicates = find_duplicate_entries(full_path)
-                if duplicates:
-                    files_with_duplicates.append({
-                        "path": file_path,
-                        "dup_count": len(duplicates),
-                        "total_dupes": sum(len(occurrences) for occurrences in duplicates.values()) - len(duplicates)
-                    })
+            for file_path in list_files:
+                try:
+                    full_path = os.path.join(root_dir, file_path)
+                    print(f"Checking: {file_path}", end="\r")  # Show progress
+                    duplicates = find_duplicate_entries(full_path)
+                    if duplicates:
+                        total_dupes = sum(len(occurrences) for occurrences in duplicates.values()) - len(duplicates)
+                        files_with_duplicates.append({
+                            "path": file_path,
+                            "dup_count": len(duplicates),
+                            "total_dupes": total_dupes
+                        })
+                        print(f"✅ Found {len(duplicates)} duplicates in {file_path}         ")
+                except Exception as e:
+                    print(f"❌ Error checking {file_path}: {str(e)}")
+            
+            # Clear the progress line
+            print(" " * 80, end="\r")
             
             if not files_with_duplicates:
                 print("✅ No files with duplicate entries found.")
@@ -990,4 +1006,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
