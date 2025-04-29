@@ -189,65 +189,395 @@ def scrape_trakt_page(url, page):
         print(f"❌ Error fetching Trakt page {page}: {str(e)}")
         return page, f"Error: {str(e)}"
 
-def extract_titles_from_letterboxd_html(html):
-    """Extract titles from a Letterboxd list page"""
-    soup = BeautifulSoup(html, 'html.parser')
-    titles = []
-    
-    # Look for film items
-    list_items = soup.select('ul.poster-list li div.film-poster')
-    
-    for item in list_items:
-        if 'data-film-name' in item.attrs:
-            title = item['data-film-name']
-            year = item.get('data-film-release-year', '')
-            
-            # Add year in parentheses if available
-            full_title = title
-            if year:
-                full_title = f"{title}"
-                
-            titles.append(full_title)
-    
-    # If we didn't find any with the poster-list approach, try alternate structure
-    if not titles:
-        # Try alternate film card structure
-        list_items = soup.select('div.film-detail h2.film-title a')
-        for item in list_items:
-            title = item.get_text(strip=True)
-            if title:
-                titles.append(title)
-    
-    return titles
-
 def scrape_letterboxd_page(url, page):
     """Scrape a specific page from a Letterboxd list"""
     try:
         # Letterboxd uses a different pagination format
         page_url = url
         if page > 1:
-            # Check if URL ends with a slash
-            if not url.endswith('/'):
-                page_url = f"{url}/page/{page}"
-            else:
-                page_url = f"{url}page/{page}"
+            # Remove trailing slash if present
+            if url.endswith('/'):
+                url = url[:-1]
+                
+            # Add pagination path
+            page_url = f"{url}/page/{page}/"
         
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache"
         }
         
         print(f"📄 Fetching Letterboxd page: {page_url}")
-        response = requests.get(page_url, headers=headers, timeout=10)
-        response.raise_for_status()
+        response = requests.get(page_url, headers=headers, timeout=15)
+        
+        # For debugging, save the first page HTML
+        if page == 1:
+            debug_path = "letterboxd_page1.html"
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            print(f"ℹ️ Saved first page HTML to {debug_path} for reference")
+        
+        # Handle HTTP status codes
+        if response.status_code != 200:
+            print(f"⚠️ Letterboxd returned status code {response.status_code}")
+            if response.status_code == 404 and page > 1:
+                # This is normal for the last page
+                return page, f"Error: 404 - End of list"
+            else:
+                return page, f"Error: HTTP {response.status_code}"
         
         # Extract the titles from the HTML
         titles = extract_titles_from_letterboxd_html(response.text)
         print(f"🎬 Found {len(titles)} titles on Letterboxd page {page}")
         
+        # If no titles found on first page, save HTML and output details
+        if not titles and page == 1:
+            debug_path = "letterboxd_debug_failed.html"
+            with open(debug_path, "w", encoding="utf-8") as f:
+                f.write(response.text)
+            print(f"⚠️ No titles found. Saved HTML to {debug_path} for debugging")
+            print("❗ Please check the HTML for the correct structure and update the extraction code")
+        
         return page, titles
     except Exception as e:
         print(f"❌ Error fetching Letterboxd page {page}: {str(e)}")
         return page, f"Error: {str(e)}"
+
+def extract_titles_from_letterboxd_html(html):
+    """Extract titles from a Letterboxd list page"""
+    soup = BeautifulSoup(html, 'html.parser')
+    titles = []
+    
+    # METHOD 1: Special handling for comparison lists (If you like this, watch this format)
+    pairs_found = soup.select('div.film-pair')
+    if pairs_found:
+        print(f"📝 Detected comparison list format with {len(pairs_found)} pairs")
+        
+        for pair in pairs_found:
+            # Each pair has two films
+            film_posters = pair.select('div.film-poster')
+            for poster in film_posters:
+                if 'data-film-name' in poster.attrs:
+                    title = poster['data-film-name']
+                    year = poster.get('data-film-release-year', '')
+                    
+                    # Add title with year if available
+                    if year:
+                        titles.append(f"{title} ({year})")
+                    else:
+                        titles.append(title)
+                        
+            # If no posters with data attributes were found, try link extraction
+            if not film_posters:
+                film_links = pair.select('a.linked-film')
+                for link in film_links:
+                    title = link.get_text(strip=True)
+                    if title:
+                        titles.append(title)
+        
+        # If we found titles in this format, return them
+        if titles:
+            return titles
+    
+    # METHOD 2: Try standard formats - poster grid
+    list_items = soup.select('li.poster-container div.film-poster')
+    
+    for item in list_items:
+        if 'data-film-name' in item.attrs:
+            title = item['data-film-name']
+            year = item.get('data-film-release-year', '')
+            
+            # Add title with year if available
+            if year:
+                titles.append(f"{title} ({year})")
+            else:
+                titles.append(title)
+    
+    # METHOD 3: Try direct linked-film extraction (more aggressive)
+    if not titles:
+        linked_films = soup.select('a.linked-film')
+        for link in linked_films:
+            title = link.get_text(strip=True)
+            if title and title not in titles:
+                titles.append(title)
+    
+    # METHOD 4: Alternative structures for different list formats
+    if not titles:
+        # Try table view format
+        list_items = soup.select('table.film-list td.film-title-wrapper a')
+        for item in list_items:
+            title = item.get_text(strip=True)
+            if title and title not in titles:
+                titles.append(title)
+                
+        # Try the standard film grid format
+        if not titles:
+            list_items = soup.select('div.film-detail h2.film-title a')
+            for item in list_items:
+                title = item.get_text(strip=True)
+                if title and title not in titles:
+                    titles.append(title)
+                    
+        # Try film-pair-content format
+        if not titles:
+            list_items = soup.select('div.film-pair-content h3.film-title a')
+            for item in list_items:
+                title = item.get_text(strip=True)
+                if title and title not in titles:
+                    # Check if there's a year element nearby
+                    year_elem = item.find_next('small', class_='metadata')
+                    if year_elem:
+                        year_text = year_elem.get_text(strip=True)
+                        if year_text and year_text.isdigit():
+                            title = f"{title} ({year_text})"
+                    titles.append(title)
+    
+        # Try any film-title links
+        if not titles:
+            list_items = soup.select('a.film-title')
+            for item in list_items:
+                title = item.get_text(strip=True)
+                if title and title not in titles:
+                    titles.append(title)
+                    
+    # METHOD 5: Extract from JSON-LD data
+    if not titles:
+        script_tags = soup.find_all('script', {'type': 'application/ld+json'})
+        for script in script_tags:
+            try:
+                json_data = json.loads(script.string)
+                if isinstance(json_data, dict) and 'itemListElement' in json_data:
+                    for item in json_data['itemListElement']:
+                        if 'item' in item and 'name' in item['item']:
+                            title = item['item']['name']
+                            if title and title not in titles:
+                                titles.append(title)
+            except:
+                continue
+    
+    # METHOD 6: Super generic fallback approach
+    if not titles:
+        # Save HTML for debugging
+        with open("letterboxd_debug.html", "w", encoding="utf-8") as f:
+            f.write(str(soup))
+            
+        print("🔍 Using generic title extraction as fallback")
+        
+        # Look for ANY links that might contain film titles
+        all_links = soup.select('a')
+        for link in all_links:
+            # Check if it has film-related classes
+            classes = link.get('class', [])
+            if any(cls in ['film-title', 'title-alt', 'frame', 'linked-film'] for cls in classes):
+                title = link.get_text(strip=True)
+                if title and len(title) > 1 and title not in titles:
+                    titles.append(title)
+    
+    return titles
+
+def extract_letterboxd_titles_using_selenium(url, quick_mode=True):
+    """
+    Extract titles from a Letterboxd page using Selenium for JavaScript-rendered content
+    This is a fallback for when regular HTML scraping fails
+    
+    Parameters:
+    - url: The Letterboxd list URL
+    - quick_mode: If True, use optimized settings for faster extraction
+    """
+    try:
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        import time
+    except ImportError:
+        print("❌ Selenium is not installed. Run: pip install selenium")
+        return []
+        
+    print("🌐 Starting Chrome in headless mode for JavaScript rendering...")
+    
+    # Configure Chrome options
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    
+    # Speed optimizations
+    if quick_mode:
+        # Disable images for faster loading
+        options.add_argument("--blink-settings=imagesEnabled=false")
+        # Disable JavaScript that's not necessary for the initial page load
+        options.add_argument("--disable-javascript")
+        # Smaller window size for faster rendering
+        options.add_argument("--window-size=800,600")
+        # Disable extensions
+        options.add_argument("--disable-extensions")
+        # Disable various background networking
+        options.add_argument("--disable-background-networking")
+        # Disable background timer throttling
+        options.add_argument("--disable-background-timer-throttling")
+        # Disable backgrounding renders
+        options.add_argument("--disable-backgrounding-occluded-windows")
+        # Use low process priority
+        options.add_argument("--disable-renderer-backgrounding")
+    else:
+        options.add_argument("--window-size=1920,1080")
+        
+    options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+    
+    titles = []
+    
+    try:
+        # Initialize the driver
+        driver = webdriver.Chrome(options=options)
+        
+        # Set page load timeout to prevent hanging
+        driver.set_page_load_timeout(20)
+        
+        # Load the page
+        print(f"📄 Loading page: {url}")
+        driver.get(url)
+        
+        # Wait for content to load (reduced time)
+        print("📊 Waiting for page to render...")
+        time.sleep(1.5 if quick_mode else 3)  # Reduced wait time in quick mode
+        
+        # Extract from alt attributes directly (fastest method)
+        print("🔍 Extracting titles from poster images...")
+        
+        # Direct extraction from img alt attributes (much faster than data attributes)
+        img_elements = driver.find_elements(By.CSS_SELECTOR, 'li.poster-container div.film-poster img')
+        for img in img_elements:
+            alt_text = img.get_attribute('alt')
+            if alt_text and alt_text not in titles:
+                titles.append(alt_text)
+                
+        # If we got fewer than expected titles, try the data-film-name attributes
+        if len(titles) < 50:  # Most lists have at least 50 films
+            print("⚠️ Few titles found with quick method, trying data attributes...")
+            film_posters = driver.find_elements(By.CSS_SELECTOR, 'li.poster-container div.film-poster')
+            
+            for poster in film_posters:
+                title = poster.get_attribute('data-film-name')
+                if title:
+                    year = poster.get_attribute('data-film-release-year')
+                    if year:
+                        full_title = f"{title} ({year})"
+                    else:
+                        full_title = title
+                        
+                    if full_title not in titles:
+                        titles.append(full_title)
+                        
+        print(f"✅ Extracted {len(titles)} titles using Selenium")
+        
+    except Exception as e:
+        print(f"❌ Selenium error: {str(e)}")
+    finally:
+        # Close the browser
+        try:
+            driver.quit()
+        except:
+            pass
+    
+    return titles
+
+def letterboxd_get_all_pages(url):
+    """
+    Get all titles from a Letterboxd list, optimized for speed
+    
+    Letterboxd loads all items on a single page for most lists,
+    so we don't need to handle pagination separately
+    """
+    print(f"📋 Processing Letterboxd list: {url}")
+    
+    # First try with regular requests
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    }
+    
+    try:
+        response = requests.get(url, headers=headers, timeout=5)  # Short timeout for quick failure
+        html = response.text
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        # Quick check - if we can find poster images, we might not need Selenium
+        posters = soup.select('li.poster-container div.film-poster')
+        title_elements = soup.select('div.film-detail h2.film-title a')
+        
+        if posters or title_elements:
+            print("🔍 Found film elements in HTML, trying regular extraction...")
+            titles = extract_titles_from_letterboxd_html(html)
+            if titles:
+                print(f"✅ Successfully extracted {len(titles)} titles without Selenium")
+                return titles
+    except:
+        pass
+        
+    # Fall back to Selenium only if needed
+    print("⚠️ Regular extraction failed, falling back to Selenium...")
+    return extract_letterboxd_titles_using_selenium(url)
+
+def scrape_letterboxd_page_with_selenium(url):
+    """
+    Scrape Letterboxd using Selenium for JavaScript-rendered content
+    Returns a single page's content because pagination will be handled separately
+    """
+    titles = extract_letterboxd_titles_using_selenium(url)
+    return 1, titles  # Always return page 1, all titles are extracted at once
+
+def scrape_letterboxd(url):
+    """
+    Special handler for Letterboxd lists that handles everything in one go
+    """
+    print(f"🌐 Processing Letterboxd list: {url}")
+    
+    # First try standard HTML scraping for the first page
+    _, titles = scrape_letterboxd_page(url, 1)
+    
+    # If we failed to get titles with regular method, use Selenium
+    if not titles or (isinstance(titles, str) and titles.startswith("Error")):
+        print("⚠️ Regular HTML scraping failed, switching to Selenium...")
+        _, titles = scrape_letterboxd_page_with_selenium(url)
+        
+        # If we got titles with Selenium, don't try to paginate anymore
+        if titles and not isinstance(titles, str):
+            return titles
+    
+    # If we got titles with regular method, try to get more pages
+    all_titles = []
+    if titles and not isinstance(titles, str):
+        all_titles.extend(titles)
+        
+        # Try next pages
+        page = 2
+        empty_count = 0
+        
+        while empty_count < 3:  # Stop after 3 empty pages
+            try:
+                _, page_titles = scrape_letterboxd_page(url, page)
+                
+                if page_titles and not isinstance(page_titles, str):
+                    if page_titles:
+                        all_titles.extend(page_titles)
+                        empty_count = 0  # Reset empty counter
+                    else:
+                        empty_count += 1
+                else:
+                    empty_count += 1
+                    
+                page += 1
+            except Exception as e:
+                print(f"❌ Error on page {page}: {str(e)}")
+                empty_count += 1
+                page += 1
+    
+    return all_titles
 
 def determine_site_type(url):
     """Determine the type of website from the URL"""
@@ -285,6 +615,15 @@ def scrape_page(url, page):
 
 def scrape_all_pages(base_url, max_empty_pages=5, delay=None):
     """Run the scraper for all pages of a URL"""
+    # Determine the site type to adjust scraping behavior
+    site_type = determine_site_type(base_url)
+    print(f"🌐 Detected site type: {site_type}")
+    
+    # Special handling for Letterboxd lists
+    if site_type == "letterboxd":
+        print("ℹ️ Using specialized Letterboxd scraper")
+        return scrape_letterboxd(base_url)
+    
     all_titles = []
     empty_count = 0
     page = 1  # Start from page 1 instead of 0
@@ -296,10 +635,6 @@ def scrape_all_pages(base_url, max_empty_pages=5, delay=None):
     
     # Adjust concurrency based on settings
     parallel_enabled = get_env_flag("ENABLE_PARALLEL_PROCESSING", "true")
-    
-    # Determine the site type to adjust scraping behavior
-    site_type = determine_site_type(base_url)
-    print(f"🌐 Detected site type: {site_type}")
     
     # For Trakt lists, use lower parallelism to avoid duplicate issues
     max_concurrent_pages = 1 if site_type == "trakt" else (3 if parallel_enabled else 1)
