@@ -196,8 +196,18 @@ def match_title_with_tmdb(title, max_retries=3, delay=1):
     for attempt in range(max_retries):
         try:
             response = requests.get(url, params=params, timeout=5)
+            
+            # Check for rate limiting
+            if response.status_code == 429:
+                # Rate limited - pause and retry with exponential backoff
+                sleep_time = (2 ** attempt) * delay
+                print(f"Rate limited. Pausing for {sleep_time}s before retry...")
+                time.sleep(sleep_time)
+                continue
+                
             response.raise_for_status()
             data = response.json()
+            
             if data["results"]:
                 show = data["results"][0]
                 return {
@@ -208,7 +218,12 @@ def match_title_with_tmdb(title, max_retries=3, delay=1):
                 params["query"] = clean_title_for_fallback(title)
             else:
                 time.sleep(delay)
+                
+        except requests.exceptions.RequestException:
+            # Network error - pause and retry
+            time.sleep(delay)
         except Exception:
+            # Other error - pause and retry
             time.sleep(delay)
 
     return "[Error]"
@@ -293,193 +308,155 @@ def scrape_url_worker(url):
     print(f"🌐 Processing: {url}")
     return url, scrape_all_pages(url)
 
+def run_scraper():
+    """Run the scraper for a single URL"""
+    clear_terminal()
+    print("🔍 Single URL Scraper")
+    url = input("Enter URL to scrape: ").strip()
+    
+    if not url:
+        print("❌ No URL provided.")
+        return
+    
+    output_file = input("Enter output file name: ").strip()
+    if not output_file:
+        print("❌ No output file provided.")
+        return
+    
+    # Get settings from environment
+    enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
+    include_year = get_env_flag("INCLUDE_YEAR", "true")
+    
+    scan_history = load_scan_history()
+    start_time = time.time()
+    
+    print(f"🌐 Scraping titles from {url}...")
+    titles = scrape_all_pages(url)
+    
+    if not titles:
+        print("❌ No titles found.")
+        return
+    
+    print(f"✅ Found {len(titles)} titles")
+    new_count, skipped_count = process_scrape_results(
+        titles, output_file, scan_history, 
+        enable_tmdb=enable_tmdb, include_year=include_year
+    )
+    
+    elapsed = time.time() - start_time
+    print(f"✅ Added {new_count} new titles, skipped {skipped_count} existing titles")
+    print(f"⏱️ Completed in {elapsed:.1f} seconds")
+
+def run_batch_scraper():
+    """Run the scraper for multiple URLs"""
+    clear_terminal()
+    print("📂 Batch URL Scraper")
+    print("Enter one URL per line (empty line to finish):")
+    
+    urls = []
+    while True:
+        url = input("> ").strip()
+        if not url:
+            break
+        urls.append(url)
+    
+    if not urls:
+        print("❌ No URLs provided.")
+        return
+    
+    output_file = input("Enter output file name: ").strip()
+    if not output_file:
+        print("❌ No output file provided.")
+        return
+    
+    # Get settings from environment
+    enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
+    include_year = get_env_flag("INCLUDE_YEAR", "true")
+    
+    scan_history = load_scan_history()
+    start_time = time.time()
+    
+    all_titles = []
+    
+    # Scrape in parallel
+    max_workers = min(10, len(urls))  # Cap at 10 threads
+    print(f"⚡ Using {max_workers} worker threads for URL processing")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_url = {executor.submit(scrape_url_worker, url): url for url in urls}
+        for future in as_completed(future_to_url):
+            url = future_to_url[future]
+            try:
+                url, titles = future.result()
+                if titles:
+                    print(f"✅ Found {len(titles)} titles from {url}")
+                    all_titles.extend(titles)
+                else:
+                    print(f"❌ No titles found from {url}")
+            except Exception as e:
+                print(f"❌ Error processing {url}: {str(e)}")
+    
+    if not all_titles:
+        print("❌ No titles found from any URL.")
+        return
+    
+    print(f"✅ Found {len(all_titles)} total titles from all URLs")
+    new_count, skipped_count = process_scrape_results(
+        all_titles, output_file, scan_history, 
+        enable_tmdb=enable_tmdb, include_year=include_year
+    )
+    
+    elapsed = time.time() - start_time
+    print(f"✅ Added {new_count} new titles, skipped {skipped_count} existing titles")
+    print(f"⏱️ Completed in {elapsed:.1f} seconds")
+
+def run_monitor_scraper():
+    """Run the monitor scraper to check for updates"""
+    clear_terminal()
+    print("🔍 Monitor Scraper (Coming Soon)")
+    input("Press Enter to continue...")
+
 def find_error_entries(filepath):
-    """Find all lines with [Error] in a file"""
+    """Find all [Error] entries in a file"""
     if not os.path.exists(filepath):
         return []
     
     error_entries = []
-    with open(filepath, "r", encoding="utf-8") as f:
-        for i, line in enumerate(f, 1):
-            # Look specifically for [Error] at the end of a line
-            if "[Error]" in line:
-                # Store the line number, original line, and just the title part
-                title = line.split("[Error]")[0].strip()
-                error_entries.append({"line_num": i, "line": line.strip(), "title": title})
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f, 1):
+                line = line.strip()
+                if "[Error]" in line:
+                    title = line.split("[Error]")[0].strip()
+                    error_entries.append({
+                        "line_num": i,
+                        "title": title,
+                        "line": line
+                    })
+    except Exception as e:
+        print(f"❌ Error reading file {filepath}: {str(e)}")
     
     return error_entries
 
-def fix_error_entries(output_file):
-    """Interactively fix entries with errors in a file"""
-    # Use the helper function to get the full file path
-    full_output_path = get_output_filepath(output_file)
-    
-    if not os.path.exists(full_output_path):
-        print(f"❌ File '{output_file}' not found.")
-        return
-    
-    # Find all error entries
-    error_entries = find_error_entries(full_output_path)
-    
-    if not error_entries:
-        print(f"✅ No errors found in '{output_file}'.")
-        return
-    
-    print(f"🔍 Found {len(error_entries)} entries with errors in '{output_file}'.")
-    
-    # Read the entire file into memory
-    with open(full_output_path, "r", encoding="utf-8") as f:
-        all_lines = f.readlines()
-    
-    # Process each error entry
-    fixed_count = 0
-    for i, entry in enumerate(error_entries, 1):
-        print(f"\n{i}/{len(error_entries)}: {entry['line']}")
-        print("Options:")
-        print("1. Try to fix with TMDB search")
-        print("2. Skip this entry")
-        print("3. Skip all remaining entries")
-        
-        choice = input("Select an option (1-3): ").strip()
-        
-        if choice == "1":
-            search_term = input(f"Enter search term (default: '{entry['title']}'): ").strip()
-            if not search_term:
-                search_term = entry['title']
-                
-            print(f"🔍 Searching TMDB for '{search_term}'...")
-            result = match_title_with_tmdb(search_term)
-            
-            if isinstance(result, dict):
-                year = f" ({result['year']})" if result.get("year") else ""
-                new_line = f"{entry['title']}{year} [{result['id']}]\n"
-                
-                print(f"✅ Found match: {new_line.strip()}")
-                confirm = input("Apply this fix? (y/n): ").strip().lower()
-                
-                if confirm == "y":
-                    # Replace the line (account for 0-based indexing)
-                    all_lines[entry['line_num'] - 1] = new_line
-                    fixed_count += 1
-                    print("✅ Entry updated.")
-                else:
-                    print("⏩ Entry not changed.")
-            else:
-                print("❌ No match found in TMDB.")
-                manual_id = input("Enter TMDB ID manually (or leave blank to skip): ").strip()
-                if manual_id and manual_id.isdigit():
-                    new_line = f"{entry['title']} [{manual_id}]\n"
-                    all_lines[entry['line_num'] - 1] = new_line
-                    fixed_count += 1
-                    print("✅ Entry updated with manual ID.")
-                else:
-                    print("⏩ Entry not changed.")
-        
-        elif choice == "2":
-            print("⏩ Skipping this entry.")
-            continue
-            
-        elif choice == "3":
-            print("⏩ Skipping all remaining entries.")
-            break
-            
-        else:
-            print("❌ Invalid option, skipping this entry.")
-    
-    # Write the updated content back to the file
-    if fixed_count > 0:
-        with open(full_output_path, "w", encoding="utf-8") as f:
-            f.writelines(all_lines)
-        print(f"\n✅ Fixed {fixed_count} entries in '{output_file}'.")
-    else:
-        print("\n⚠️ No entries were changed.")
+def extract_year_from_title(title_line):
+    """Extract year from a title line if present"""
+    # Look for pattern like " (2023)" at the end of the title part
+    match = re.search(r'\((\d{4})\)', title_line)
+    if match:
+        return match.group(1)
+    return None
 
-def fix_errors_menu():
-    """Menu for fixing error entries in lists"""
-    while True:
-        clear_terminal()
-        print("🔧 Fix Errors in Lists")
-        print("1. Select file to fix")
-        print("2. Scan directory for files with errors")
-        print("3. Back to Main Menu")
-        
-        choice = input("\nSelect an option (1-3): ").strip()
-        
-        if choice == "1":
-            output_file = input("Enter the name of the file to fix: ").strip()
-            fix_error_entries(output_file)
-            input("\nPress Enter to continue...")
-            
-        elif choice == "2":
-            # Get root directory from settings
-            root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
-            print(f"🔍 Scanning directory: {root_dir}")
-            
-            # Find only list files using the new function
-            list_files = scan_for_list_files(root_dir)
-            
-            if not list_files:
-                print("❌ No list files found.")
-                input("Press Enter to continue...")
-                continue
-            
-            print(f"📋 Found {len(list_files)} list files. Scanning for errors...")
-            
-            # Check each file for errors
-            files_with_errors = []
-            for file_path in list_files:
-                try:
-                    full_path = os.path.join(root_dir, file_path)
-                    print(f"Checking: {file_path}", end="\r")  # Show progress
-                    error_entries = find_error_entries(full_path)
-                    if error_entries:
-                        files_with_errors.append({
-                            "path": file_path,
-                            "error_count": len(error_entries)
-                        })
-                        print(f"✅ Found {len(error_entries)} errors in {file_path}        ")
-                except Exception as e:
-                    print(f"❌ Error scanning {file_path}: {str(e)}")
-            
-            # Clear the progress line
-            print(" " * 80, end="\r")
-            
-            if not files_with_errors:
-                print("✅ No files with errors found.")
-                input("Press Enter to continue...")
-                continue
-                
-            # Display files with errors
-            print(f"\n📋 Found {len(files_with_errors)} files with errors:")
-            for i, file_info in enumerate(files_with_errors, 1):
-                print(f"{i}. {file_info['path']} ({file_info['error_count']} errors)")
-            
-            file_choice = input("\nEnter file number to fix (or 0 to cancel): ").strip()
-            try:
-                file_idx = int(file_choice) - 1
-                if file_idx == -1:
-                    continue
-                if 0 <= file_idx < len(files_with_errors):
-                    file_to_fix = files_with_errors[file_idx]['path']
-                    fix_error_entries(file_to_fix)
-                else:
-                    print("❌ Invalid file number.")
-                input("\nPress Enter to continue...")
-            except ValueError:
-                print("❌ Please enter a valid number.")
-                input("Press Enter to continue...")
-            
-        elif choice == "3":
-            return
-        else:
-            input("❌ Invalid option. Press Enter to try again...")
-
-def find_duplicate_entries(filepath):
-    """Find all duplicate titles in a file"""
+def find_duplicate_entries_ultrafast(filepath, respect_years=True):
+    """
+    Ultra-optimized duplicate finder that reads the file only once,
+    drastically improving performance for large files
+    
+    If respect_years is True, titles with different years are considered different entries
+    """
     if not os.path.exists(filepath):
         return {}
     
-    # Dictionary to track title occurrences and their line numbers
+    # Dictionary to track title occurrences with line numbers
     title_occurrences = {}
     
     try:
@@ -489,15 +466,28 @@ def find_duplicate_entries(filepath):
                 if not line.strip():
                     continue
                     
-                # Extract just the title part (before any "[" or "->")
-                # Handle potential formatting issues gracefully
                 try:
-                    title = line.split("->")[0].split("[")[0].strip()
-                    if title:
-                        if title in title_occurrences:
-                            title_occurrences[title].append({"line_num": i, "full_line": line.strip()})
+                    # Extract just the title part (before any "[" or "->")
+                    title_part = line.split("->")[0].split("[")[0].strip()
+                    
+                    if title_part:
+                        # If we're respecting years, include the year in the key if present
+                        if respect_years:
+                            year = extract_year_from_title(title_part)
+                            # Remove year from title for cleaner display
+                            base_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title_part)
+                            
+                            if year:
+                                key = f"{base_title} ({year})"
+                            else:
+                                key = base_title
                         else:
-                            title_occurrences[title] = [{"line_num": i, "full_line": line.strip()}]
+                            key = title_part
+                            
+                        if key in title_occurrences:
+                            title_occurrences[key].append({"line_num": i, "full_line": line.strip()})
+                        else:
+                            title_occurrences[key] = [{"line_num": i, "full_line": line.strip()}]
                 except Exception:
                     continue  # Skip problematic lines
     except Exception as e:
@@ -510,465 +500,212 @@ def find_duplicate_entries(filepath):
     
     return duplicates
 
-def scan_for_text_files(root_dir):
-    """Scan for both .txt files and possible text files without extensions"""
-    text_files = []
-    try:
-        for root, dirs, files in os.walk(root_dir):
-            for file in files:
-                full_path = os.path.join(root, file)
-                # Skip obviously non-text files by extension
-                if file.lower().endswith(('.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mkv', '.exe', '.zip', '.tar.gz')):
-                    continue
-                    
-                # Check if file is readable
-                if os.access(full_path, os.R_OK):
-                    try:
-                        # Try to read the first few lines to check if it's text
-                        is_text = True
-                        with open(full_path, 'rb') as f:
-                            try:
-                                sample = f.read(1024)  # Read first 1KB
-                                # Try to decode as text
-                                sample.decode('utf-8')
-                            except UnicodeDecodeError:
-                                is_text = False
-                                
-                        if is_text:
-                            rel_path = os.path.relpath(full_path, root_dir)
-                            text_files.append(rel_path)
-                            print(f"Found: {rel_path}")  # Debug output
-                    except Exception:
-                        # Skip files we can't read
-                        continue
-    except Exception as e:
-        print(f"❌ Error scanning directory: {str(e)}")
-        
-    return text_files
-
-def scan_for_list_files(root_dir):
-    """Scan for only files that are likely movie/TV show lists"""
-    list_files = []
-    ignored_dirs = {'.git', '__pycache__', 'node_modules'}
-    ignored_extensions = {'.py', '.json', '.yml', '.yaml', '.md', '.gitignore', 
-                         '.env', '.env.template', '.dockerignore'}
+def remove_duplicate_lines(filepath, lines_to_keep):
+    """
+    Remove duplicate entries from a file, keeping only specified line numbers
     
+    Args:
+        filepath: Path to the file
+        lines_to_keep: Set of line numbers to keep
+    """
     try:
-        for root, dirs, files in os.walk(root_dir):
-            # Skip ignored directories
-            dirs[:] = [d for d in dirs if d not in ignored_dirs]
-            
-            for file in files:
-                # Skip files with ignored extensions
-                _, ext = os.path.splitext(file.lower())
-                if ext in ignored_extensions:
-                    continue
-                
-                full_path = os.path.join(root, file)
-                
-                # Check if file is readable
-                if os.access(full_path, os.R_OK):
-                    try:
-                        # Try to read the first few lines to check if it looks like a movie list
-                        is_list_file = False
-                        with open(full_path, 'r', encoding='utf-8') as f:
-                            # Try to read first 5 lines
-                            for _ in range(5):
-                                line = f.readline().strip()
-                                if line and (
-                                    # Look for patterns that suggest movie/TV lists
-                                    '[' in line or 
-                                    '->' in line or
-                                    '(' in line and ')' in line or  # Year in parentheses
-                                    'Error' in line
-                                ):
-                                    is_list_file = True
-                                    break
-                        
-                        if is_list_file:
-                            rel_path = os.path.relpath(full_path, root_dir)
-                            list_files.append(rel_path)
-                            print(f"Found list file: {rel_path}")
-                    except Exception:
-                        # Skip files we can't read or that have encoding issues
-                        continue
-    except Exception as e:
-        print(f"❌ Error scanning directory: {str(e)}")
+        # Read all lines
+        with open(filepath, "r", encoding="utf-8") as f:
+            all_lines = f.readlines()
         
-    return list_files
+        # Write back only the lines we want to keep
+        with open(filepath, "w", encoding="utf-8") as f:
+            for i, line in enumerate(all_lines, 1):
+                if i in lines_to_keep or not line.strip():  # Keep empty lines and selected lines
+                    f.write(line)
+                    
+        return True
+    except Exception as e:
+        print(f"❌ Error modifying file: {str(e)}")
+        return False
 
 def duplicates_menu():
-    """Menu for managing duplicate entries in lists"""
+    """Menu for managing duplicates in list files"""
     while True:
         clear_terminal()
         print("🔍 Manage Duplicates in Lists")
-        print("1. Select file to check for duplicates")
-        print("2. Scan directory for files with duplicates")
-        print("3. Back to Main Menu")
-        
-        choice = input("\nSelect an option (1-3): ").strip()
-        
+        print("1. Scan file for duplicates")
+        print("2. Auto-fix duplicates (keep first occurrence)")
+        print("3. Return to main menu")
+
+        choice = input("\nChoose an option (1-3) [1]: ").strip() or "1"
+
         if choice == "1":
-            output_file = input("Enter the name of the file to check: ").strip()
-            manage_duplicates(output_file)
-            input("\nPress Enter to continue...")
+            filepath = input("Enter file path to scan: ").strip()
+            full_path = get_output_filepath(filepath)
             
-        elif choice == "2":
-            # Get root directory from settings
-            root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
-            print(f"🔍 Scanning directory: {root_dir}")
-            
-            # Find only list files using the new function
-            list_files = scan_for_list_files(root_dir)
-            
-            if not list_files:
-                print("❌ No list files found.")
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
                 input("Press Enter to continue...")
                 continue
             
-            print(f"📋 Found {len(list_files)} list files. Scanning for duplicates...")
+            # Ask if different years should be considered different titles
+            respect_years = input("Treat titles with different years as different entries? (Y/n): ").strip().lower() != 'n'
+                
+            print(f"🔍 Scanning for duplicates in {filepath}...")
+            duplicates = find_duplicate_entries_ultrafast(full_path, respect_years)
             
-            # Check each file for duplicates
-            files_with_duplicates = []
-            for file_path in list_files:
-                try:
-                    full_path = os.path.join(root_dir, file_path)
-                    print(f"Checking: {file_path}", end="\r")  # Show progress
-                    duplicates = find_duplicate_entries(full_path)
-                    if duplicates:
-                        total_dupes = sum(len(occurrences) for occurrences in duplicates.values()) - len(duplicates)
-                        files_with_duplicates.append({
-                            "path": file_path,
-                            "dup_count": len(duplicates),
-                            "total_dupes": total_dupes
-                        })
-                        print(f"✅ Found {len(duplicates)} duplicates in {file_path}         ")
-                except Exception as e:
-                    print(f"❌ Error checking {file_path}: {str(e)}")
-            
-            # Clear the progress line
-            print(" " * 80, end="\r")
-            
-            if not files_with_duplicates:
-                print("✅ No files with duplicate entries found.")
+            if not duplicates:
+                print("✅ No duplicates found!")
                 input("Press Enter to continue...")
                 continue
                 
-            # Display files with duplicates
-            print(f"\n📋 Found {len(files_with_duplicates)} files with duplicates:")
-            for i, file_info in enumerate(files_with_duplicates, 1):
-                print(f"{i}. {file_info['path']} " +
-                      f"({file_info['dup_count']} titles with {file_info['total_dupes']} duplicate entries)")
+            print(f"⚠️ Found {len(duplicates)} titles with duplicates")
             
-            file_choice = input("\nEnter file number to manage (or 0 to cancel): ").strip()
-            try:
-                file_idx = int(file_choice) - 1
-                if file_idx == -1:
-                    continue
-                if 0 <= file_idx < len(files_with_duplicates):
-                    file_to_fix = files_with_duplicates[file_idx]['path']
-                    manage_duplicates(file_to_fix)
+            # Keep track of lines to remove
+            lines_to_remove = set()
+            lines_to_keep = set()
+            
+            for title, occurrences in duplicates.items():
+                print(f"\n📄 Title: {title}")
+                print(f"   Found {len(occurrences)} occurrences:")
+                for idx, occurrence in enumerate(occurrences, 1):
+                    print(f"   {idx}. Line {occurrence['line_num']}: {occurrence['full_line']}")
+                
+                # Ask which occurrence to keep
+                while True:
+                    keep_idx = input(f"\nWhich occurrence to keep? (1-{len(occurrences)}) [1]: ").strip() or "1"
+                    try:
+                        keep_idx = int(keep_idx)
+                        if 1 <= keep_idx <= len(occurrences):
+                            break
+                        print(f"❌ Please enter a number between 1 and {len(occurrences)}")
+                    except ValueError:
+                        print("❌ Please enter a valid number")
+                
+                # Mark the chosen line to keep, all others for removal
+                for idx, occurrence in enumerate(occurrences, 1):
+                    if idx == keep_idx:
+                        lines_to_keep.add(occurrence['line_num'])
+                    else:
+                        lines_to_remove.add(occurrence['line_num'])
+                
+                if input("\nProcess next duplicate? (Y/n): ").strip().lower() == 'n':
+                    break
+            
+            # Ask if the user wants to apply the changes
+            if lines_to_remove:
+                print(f"\n⚠️ Ready to remove {len(lines_to_remove)} duplicate lines and keep {len(lines_to_keep)} lines")
+                if input("Apply changes? (y/N): ").strip().lower() == 'y':
+                    # Create a set of all line numbers in the file
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        total_lines = sum(1 for _ in f)
+                    
+                    # Lines to keep includes all lines NOT in lines_to_remove
+                    all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
+                    
+                    if remove_duplicate_lines(full_path, all_lines_to_keep):
+                        print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
+                    else:
+                        print("❌ Failed to remove duplicates")
                 else:
-                    print("❌ Invalid file number.")
-                input("\nPress Enter to continue...")
-            except ValueError:
-                print("❌ Please enter a valid number.")
+                    print("❌ Changes discarded")
+            
+            input("\nPress Enter to continue...")
+            
+        elif choice == "2":
+            filepath = input("Enter file path to fix: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
                 input("Press Enter to continue...")
+                continue
+                
+            # Ask if different years should be considered different titles
+            respect_years = input("Treat titles with different years as different entries? (Y/n): ").strip().lower() != 'n'
+            
+            print(f"🔍 Scanning for duplicates in {filepath}...")
+            duplicates = find_duplicate_entries_ultrafast(full_path, respect_years)
+            
+            if not duplicates:
+                print("✅ No duplicates found!")
+                input("Press Enter to continue...")
+                continue
+            
+            print(f"⚠️ Found {len(duplicates)} titles with duplicates")
+            print("🔧 Auto-fixing by keeping the first occurrence of each duplicate...")
+            
+            # Automatically create lists of lines to keep (first occurrence) and remove (all others)
+            lines_to_keep = set()
+            lines_to_remove = set()
+            
+            for title, occurrences in duplicates.items():
+                # Keep the first occurrence
+                lines_to_keep.add(occurrences[0]['line_num'])
+                
+                # Remove all other occurrences
+                for occurrence in occurrences[1:]:
+                    lines_to_remove.add(occurrence['line_num'])
+            
+            # Create a set of all line numbers in the file
+            with open(full_path, "r", encoding="utf-8") as f:
+                total_lines = sum(1 for _ in f)
+            
+            # Lines to keep includes all lines NOT in lines_to_remove
+            all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
+            
+            if remove_duplicate_lines(full_path, all_lines_to_keep):
+                print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
+            else:
+                print("❌ Failed to remove duplicates")
+                
+            input("\nPress Enter to continue...")
             
         elif choice == "3":
             return
         else:
-            input("❌ Invalid option. Press Enter to try again...")
+            input("❌ Invalid option. Press Enter to continue...")
 
-def run_batch_scraper():
-    ENABLE_TMDB_MATCHING = get_env_flag("ENABLE_TMDB_MATCHING")
-    INCLUDE_YEAR = get_env_flag("INCLUDE_YEAR")
-    scan_history = load_scan_history()
-
-    clear_terminal()
-    print("📋 Batch Scraping Mode")
-    print("Enter URLs (one per line). Type 'done' when finished:")
-    
-    urls = []
-    while True:
-        url = input().strip()
-        if url.lower() == 'done':
-            break
-        if url:  # Skip empty lines
-            urls.append(url)
-    
-    if not urls:
-        print("❌ No URLs provided. Returning to menu.")
-        input("Press Enter to continue...")
-        return
-    
-    # Get concurrency settings
-    max_workers = min(os.cpu_count() or 1, len(urls))
-    concurrent = input(f"\n⚡ Use parallel processing? (up to {max_workers} URLs at once) (y/n): ").strip().lower() == 'y'
-    
-    mode = input("\n📁 Output mode:\n1. Single output file for all URLs\n2. Separate output file for each URL\nSelect (1-2): ").strip()
-    
-    if mode == "1":
-        # Single output file mode
-        output_file = input("📝 Enter the name of the output file (with .txt extension): ").strip()
-        
-        total_new = 0
-        total_skipped = 0
-        
-        all_titles = []
-        if concurrent and len(urls) > 1:
-            print(f"\n⚙️ Scraping {len(urls)} URLs in parallel with {max_workers} workers...")
-            try:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {executor.submit(scrape_url_worker, url): url for url in urls}
-                    for future in as_completed(futures):
-                        url = futures[future]
-                        try:
-                            titles = future.result()[1]  # Get titles from result tuple
-                            print(f"✅ Finished scraping: {url} - found {len(titles)} titles")
-                            all_titles.extend(titles)
-                        except Exception as e:
-                            print(f"❌ Error scraping {url}: {str(e)}")
-            except Exception as e:
-                print(f"❌ Error during parallel scraping: {str(e)}")
-        else:
-            for i, url in enumerate(urls, 1):
-                print(f"\n🌐 Processing URL {i}/{len(urls)}: {url}")
-                try:
-                    titles = scrape_all_pages(url)
-                    print(f"✅ Finished scraping: {url} - found {len(titles)} titles")
-                    all_titles.extend(titles)
-                except Exception as e:
-                    print(f"❌ Error scraping {url}: {str(e)}")
-        
-        if all_titles:
-            new_count, skipped_count = process_scrape_results(
-                all_titles, output_file, scan_history, 
-                ENABLE_TMDB_MATCHING, INCLUDE_YEAR
-            )
-            
-            print(f"\n✅ Total: Added {new_count} new titles to '{output_file}'")
-            if skipped_count > 0:
-                print(f"⏩ Total: Skipped {skipped_count} titles already in '{output_file}'")
-        else:
-            print("❌ No titles were found. Check for errors above.")
-    
-    elif mode == "2":
-        # Multiple output files mode
-        if concurrent and len(urls) > 1:
-            # First collect output filenames for each URL
-            url_to_output = {}
-            for i, url in enumerate(urls, 1):
-                output_file = input(f"📝 Enter output file name for URL {i} ({url}) (with .txt extension): ").strip()
-                url_to_output[url] = output_file
-            
-            # Then scrape URLs in parallel
-            url_to_titles = {}
-            print(f"\n⚙️ Scraping {len(urls)} URLs in parallel with {max_workers} workers...")
-            
-            try:
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = {executor.submit(scrape_url_worker, url): url for url in urls}
-                    for future in as_completed(futures):
-                        url = futures[future]
-                        try:
-                            _, titles = future.result()
-                            url_to_titles[url] = titles
-                            print(f"✅ Finished scraping: {url} - found {len(titles)} titles")
-                        except Exception as e:
-                            print(f"❌ Error scraping {url}: {str(e)}")
-                            url_to_titles[url] = []
-            except Exception as e:
-                print(f"❌ Error during parallel scraping: {str(e)}")
-            
-            # Process the results for each URL
-            for url in urls:
-                titles = url_to_titles.get(url, [])
-                output_file = url_to_output[url]
-                
-                if titles:
-                    new_count, skipped_count = process_scrape_results(
-                        titles, output_file, scan_history, 
-                        ENABLE_TMDB_MATCHING, INCLUDE_YEAR
-                    )
-                    print(f"✅ Added {new_count} new titles to '{output_file}'")
-                    if skipped_count > 0:
-                        print(f"⏩ Skipped {skipped_count} titles already in '{output_file}'")
-                else:
-                    print(f"⚠️ No titles found for {url} to add to '{output_file}'")
-        else:
-            # Process URLs sequentially
-            for i, url in enumerate(urls, 1):
-                print(f"\n🌐 Processing URL {i}/{len(urls)}: {url}")
-                output_file = input(f"📝 Enter output file name for URL {i} ({url}) (with .txt extension): ").strip()
-                
-                try:
-                    titles = scrape_all_pages(url)
-                    if titles:
-                        new_count, skipped_count = process_scrape_results(
-                            titles, output_file, scan_history, 
-                            ENABLE_TMDB_MATCHING, INCLUDE_YEAR
-                        )
-                        print(f"✅ Added {new_count} new titles to '{output_file}'")
-                        if skipped_count > 0:
-                            print(f"⏩ Skipped {skipped_count} titles already in '{output_file}'")
-                    else:
-                        print(f"⚠️ No titles found for {url}")
-                except Exception as e:
-                    print(f"❌ Error scraping {url}: {str(e)}")
-    
-    else:
-        print("❌ Invalid option.")
-
-    input("\nPress Enter to return to the main menu...")
-
-def run_scraper():
-    ENABLE_TMDB_MATCHING = get_env_flag("ENABLE_TMDB_MATCHING")
-    INCLUDE_YEAR = get_env_flag("INCLUDE_YEAR")
-    scan_history = load_scan_history()
-
+def fix_errors_menu():
+    """Menu for fixing errors in list files"""
     while True:
         clear_terminal()
-        url = input("🌐 Enter the list URL to scrape: ").strip()
-        output_file = input("📝 Enter the name of the output file (with .txt extension): ").strip()
+        print("🔧 Fix Errors in Lists")
+        print("1. Scan file for [Error] entries")
+        print("2. Return to main menu")
 
-        titles = scrape_all_pages(url)
-        new_count, skipped_count = process_scrape_results(
-            titles, output_file, scan_history, 
-            ENABLE_TMDB_MATCHING, INCLUDE_YEAR
-        )
-        
-        print(f"\n✅ Saved {new_count} new titles to '{output_file}'")
-        if skipped_count > 0:
-            print(f"⏩ Skipped {skipped_count} titles already in '{output_file}'")
-
-        again = input("\n🔁 Would you like to scrape another URL? (y/n): ").strip().lower()
-        if again != "y":
-            break
-
-def show_settings():
-    while True:
-        clear_terminal()
-        tmdb_enabled = get_env_flag("ENABLE_TMDB_MATCHING")
-        include_year = get_env_flag("INCLUDE_YEAR")
-        parallel_enabled = get_env_flag("ENABLE_PARALLEL_PROCESSING", "true")
-        page_delay = float(os.getenv("PAGE_FETCH_DELAY", "0.5"))
-        tmdb_workers = int(os.getenv("TMDB_MAX_WORKERS", "16"))
-        output_root = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
-        
-        print("⚙️ Current Settings:")
-        print(f"1. TMDB Matching: {'ON' if tmdb_enabled else 'OFF'}")
-        print(f"2. Include Year in Output: {'ON' if include_year else 'OFF'}")
-        print(f"3. Parallel Processing: {'ON' if parallel_enabled else 'OFF'}")
-        print(f"4. Page Fetch Delay: {page_delay}s")
-        print(f"5. TMDB Max Workers: {tmdb_workers}")
-        print(f"6. Output Root Directory: {output_root}")
-        print("7. Clear history for a specific output file")
-        print("8. Clear ALL scan history")
-        print("9. Back to Main Menu")
-        
-        choice = input("Select an option (1-9): ").strip()
+        choice = input("\nChoose an option (1-2): ").strip()
 
         if choice == "1":
-            update_env_variable("ENABLE_TMDB_MATCHING", not tmdb_enabled)
-        elif choice == "2":
-            update_env_variable("INCLUDE_YEAR", not include_year)
-        elif choice == "3":
-            update_env_variable("ENABLE_PARALLEL_PROCESSING", not parallel_enabled)
-        elif choice == "4":
-            try:
-                new_delay = float(input("Enter page fetch delay in seconds (e.g. 0.5): "))
-                if new_delay >= 0:
-                    with open(ENV_FILE, "r") as f:
-                        lines = f.readlines()
-                    found = False
-                    for i, line in enumerate(lines):
-                        if line.startswith("PAGE_FETCH_DELAY="):
-                            lines[i] = f"PAGE_FETCH_DELAY={new_delay}\n"
-                            found = True
-                            break
-                    if not found:
-                        lines.append(f"PAGE_FETCH_DELAY={new_delay}\n")
-                    with open(ENV_FILE, "w") as f:
-                        f.writelines(lines)
-                    os.environ["PAGE_FETCH_DELAY"] = str(new_delay)
-                    print(f"✅ Page fetch delay set to {new_delay}s")
-                else:
-                    print("❌ Delay must be non-negative")
-            except ValueError:
-                print("❌ Invalid input, please enter a number")
-            input("Press Enter to continue...")
-        elif choice == "5":
-            try:
-                new_workers = int(input("Enter max worker threads for TMDB API (8-32 recommended): "))
-                if new_workers > 0:
-                    with open(ENV_FILE, "r") as f:
-                        lines = f.readlines()
-                    found = False
-                    for i, line in enumerate(lines):
-                        if line.startswith("TMDB_MAX_WORKERS="):
-                            lines[i] = f"TMDB_MAX_WORKERS={new_workers}\n"
-                            found = True
-                            break
-                    if not found:
-                        lines.append(f"TMDB_MAX_WORKERS={new_workers}\n")
-                    with open(ENV_FILE, "w") as f:
-                        f.writelines(lines)
-                    os.environ["TMDB_MAX_WORKERS"] = str(new_workers)
-                    print(f"✅ TMDB max workers set to {new_workers}")
-                else:
-                    print("❌ Worker count must be positive")
-            except ValueError:
-                print("❌ Invalid input, please enter a number")
-            input("Press Enter to continue...")
-        elif choice == "6":
-            current_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
-            print(f"Current output directory: {current_dir}")
-            new_dir = input("Enter new output root directory (leave empty to keep current): ").strip()
+            filepath = input("Enter file path to scan: ").strip()
+            full_path = get_output_filepath(filepath)
             
-            if new_dir:
-                # Check if directory exists, create if not
-                if not os.path.exists(new_dir):
-                    try:
-                        os.makedirs(new_dir)
-                        print(f"✅ Created directory: {new_dir}")
-                    except Exception as e:
-                        print(f"❌ Could not create directory: {str(e)}")
-                        input("Press Enter to continue...")
-                        continue
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
                 
-                # Update the setting
-                update_env_string("OUTPUT_ROOT_DIR", new_dir)
-                print(f"✅ Output directory set to: {new_dir}")
+            print(f"🔍 Scanning for errors in {filepath}...")
+            errors = find_error_entries(full_path)
             
+            if not errors:
+                print("✅ No errors found!")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"⚠️ Found {len(errors)} error entries")
             input("Press Enter to continue...")
-        elif choice == "7":
-            filename = input("Enter the output filename to clear its history: ").strip()
-            clear_history("file", filename)
-            print(f"✅ History for '{filename}' cleared.")
-            input("Press Enter to return...")
-        elif choice == "8":
-            confirm = input("⚠️ This will erase ALL scan history. Type 'yes' to confirm: ").strip().lower()
-            if confirm == "yes":
-                clear_history("all")
-                print("✅ All history cleared.")
-            else:
-                print("❌ Cancelled.")
-            input("Press Enter to return...")
-        elif choice == "9":
-            break
+        elif choice == "2":
+            return
         else:
-            input("❌ Invalid option. Press Enter to try again...")
+            input("❌ Invalid option. Press Enter to continue...")
 
 def main_menu():
+    """Main menu for the application"""
     while True:
         clear_terminal()
-        print("📋 Menu")
+        print("📋 Parsely - TV Show List Manager")
         print("1. Run Scraper (Single URL)")
         print("2. Batch Scraper (Multiple URLs)")
         print("3. Monitor Scraper")
         print("4. Fix Errors in Lists")
-        print("5. Manage Duplicates in Lists")  # New option
+        print("5. Manage Duplicates in Lists")
         print("6. Settings")
         print("7. Exit")
 
@@ -982,7 +719,7 @@ def main_menu():
             run_monitor_scraper()
         elif choice == "4":
             fix_errors_menu()
-        elif choice == "5":  # New option
+        elif choice == "5":
             duplicates_menu()
         elif choice == "6":
             show_settings()
@@ -992,17 +729,14 @@ def main_menu():
         else:
             input("❌ Invalid option. Press Enter to continue...")
 
-def main():
-    """Main function with command line argument support"""
-    import sys
-    
-    # If called with --monitor-check, run monitor check and exit
-    if len(sys.argv) > 1 and sys.argv[1] == "--monitor-check":
-        run_monitor_check()
-        sys.exit(0)
-        
-    # Otherwise start interactive menu
-    main_menu()
-
+# This is the main entry point for the program
 if __name__ == "__main__":
-    main()
+    # Start the main menu
+    try:
+        main_menu()
+    except KeyboardInterrupt:
+        print("\n👋 Program interrupted. Exiting.")
+    except Exception as e:
+        print(f"\n❌ Unexpected error: {str(e)}")
+        import traceback
+        traceback.print_exc()
