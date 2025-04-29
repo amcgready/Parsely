@@ -106,19 +106,189 @@ def extract_titles_from_html(html):
     cards = soup.select('div.header.movie-title')
     return [card.get_text(strip=True).rsplit("(", 1)[0].replace(":", "").strip() for card in cards]
 
-def scrape_page(url, page):
+def extract_titles_from_trakt_html(html):
+    """Extract titles from a Trakt list page"""
+    soup = BeautifulSoup(html, 'html.parser')
+    titles = []
+    
+    # Look for movie/show items in the list
+    list_items = soup.select('div.grid-item')
+    
+    # For tracking duplicates to determine if this is the same page content
+    seen_titles = set()
+    duplicates_found = 0
+    
+    for item in list_items:
+        # Find title element - looking for the specific structure in Trakt lists
+        title_elem = item.select_one('a.titles-link h3')
+        if title_elem:
+            # Get the title text
+            title = title_elem.get_text(strip=True)
+            
+            # Try to find the year separately
+            year_elem = item.select_one('div.year')
+            year = year_elem.get_text(strip=True) if year_elem else None
+            
+            # Create clean title
+            if title:
+                # If year was found separately, make sure it's not already in the title
+                if year and f"({year})" in title:
+                    title = title.replace(f"({year})", "").strip()
+                
+                # Check if we've already seen this title (indicates duplicate content)
+                if title in seen_titles:
+                    duplicates_found += 1
+                else:
+                    seen_titles.add(title)
+                    titles.append(title)
+    
+    # If all titles were duplicates, this indicates we're likely seeing the same page again
+    if duplicates_found > 0 and duplicates_found >= len(list_items) - 1:
+        # Return a special flag to indicate duplicate content
+        return "DUPLICATE_PAGE"
+    
+    return titles
+
+def scrape_trakt_page(url, page):
+    """Scrape a specific page from a Trakt list"""
     try:
-        full_url = f"{url}?append=yes&q_current_page={page}"
-        response = requests.get(full_url, timeout=10)
+        # Trakt uses a different pagination format
+        page_url = url
+        if page > 1:
+            # For standard Trakt list pages, try using standard pagination format
+            page_url = f"{url}?page={page}"
+            
+            # Special handling for specific URL patterns
+            if "/users/" in url and "/lists/" in url:
+                # Extract list ID for items API
+                list_id = url.split("/lists/")[-1].split("/")[0]
+                if list_id.isdigit():
+                    # Try the API-style pagination for user lists
+                    page_url = f"{url}/items?page={page}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        print(f"📄 Fetching Trakt page: {page_url}")
+        response = requests.get(page_url, headers=headers, timeout=10)
         response.raise_for_status()
-        return page, extract_titles_from_html(response.text)
+        
+        # Extract the titles from the HTML
+        titles = extract_titles_from_trakt_html(response.text)
+        
+        # Check if we got the duplicate page marker
+        if titles == "DUPLICATE_PAGE":
+            print(f"⚠️ Detected duplicate content on page {page} - this is likely the end of the list")
+            return page, "Error: End of list reached"
+            
+        print(f"🎬 Found {len(titles)} titles on Trakt page {page}")
+        
+        return page, titles
     except Exception as e:
+        print(f"❌ Error fetching Trakt page {page}: {str(e)}")
         return page, f"Error: {str(e)}"
 
+def extract_titles_from_letterboxd_html(html):
+    """Extract titles from a Letterboxd list page"""
+    soup = BeautifulSoup(html, 'html.parser')
+    titles = []
+    
+    # Look for film items
+    list_items = soup.select('ul.poster-list li div.film-poster')
+    
+    for item in list_items:
+        if 'data-film-name' in item.attrs:
+            title = item['data-film-name']
+            year = item.get('data-film-release-year', '')
+            
+            # Add year in parentheses if available
+            full_title = title
+            if year:
+                full_title = f"{title}"
+                
+            titles.append(full_title)
+    
+    # If we didn't find any with the poster-list approach, try alternate structure
+    if not titles:
+        # Try alternate film card structure
+        list_items = soup.select('div.film-detail h2.film-title a')
+        for item in list_items:
+            title = item.get_text(strip=True)
+            if title:
+                titles.append(title)
+    
+    return titles
+
+def scrape_letterboxd_page(url, page):
+    """Scrape a specific page from a Letterboxd list"""
+    try:
+        # Letterboxd uses a different pagination format
+        page_url = url
+        if page > 1:
+            # Check if URL ends with a slash
+            if not url.endswith('/'):
+                page_url = f"{url}/page/{page}"
+            else:
+                page_url = f"{url}page/{page}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        print(f"📄 Fetching Letterboxd page: {page_url}")
+        response = requests.get(page_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # Extract the titles from the HTML
+        titles = extract_titles_from_letterboxd_html(response.text)
+        print(f"🎬 Found {len(titles)} titles on Letterboxd page {page}")
+        
+        return page, titles
+    except Exception as e:
+        print(f"❌ Error fetching Letterboxd page {page}: {str(e)}")
+        return page, f"Error: {str(e)}"
+
+def determine_site_type(url):
+    """Determine the type of website from the URL"""
+    if "trakt.tv" in url:
+        return "trakt"
+    elif "letterboxd.com" in url:
+        return "letterboxd"
+    elif "mdblist.com" in url:
+        return "mdblist"
+    else:
+        return "unknown"
+
+def scrape_page(url, page):
+    """
+    Scrape a specific page using the appropriate scraper based on the URL
+    This replaces the original scrape_page function
+    """
+    site_type = determine_site_type(url)
+    
+    if site_type == "trakt":
+        return scrape_trakt_page(url, page)
+    elif site_type == "letterboxd":
+        return scrape_letterboxd_page(url, page)
+    elif site_type == "mdblist":
+        # Original MDBList scraper logic
+        try:
+            full_url = f"{url}?append=yes&q_current_page={page}"
+            response = requests.get(full_url, timeout=10)
+            response.raise_for_status()
+            return page, extract_titles_from_html(response.text)
+        except Exception as e:
+            return page, f"Error: {str(e)}"
+    else:
+        return page, f"Error: Unsupported site type for {url}"
+
 def scrape_all_pages(base_url, max_empty_pages=5, delay=None):
-    all_lines = []
+    """Run the scraper for all pages of a URL"""
+    all_titles = []
     empty_count = 0
-    page = 0
+    page = 1  # Start from page 1 instead of 0
+    seen_titles = set()  # Track seen titles to detect duplicates
     
     # Get delay from environment or use default
     if delay is None:
@@ -126,7 +296,13 @@ def scrape_all_pages(base_url, max_empty_pages=5, delay=None):
     
     # Adjust concurrency based on settings
     parallel_enabled = get_env_flag("ENABLE_PARALLEL_PROCESSING", "true")
-    max_concurrent_pages = 3 if parallel_enabled else 1  # Reduce from 5 to 3 if parallel enabled
+    
+    # Determine the site type to adjust scraping behavior
+    site_type = determine_site_type(base_url)
+    print(f"🌐 Detected site type: {site_type}")
+    
+    # For Trakt lists, use lower parallelism to avoid duplicate issues
+    max_concurrent_pages = 1 if site_type == "trakt" else (3 if parallel_enabled else 1)
     
     print(f"ℹ️ Using {delay}s delay between page batches")
     print(f"ℹ️ Processing {max_concurrent_pages} pages concurrently")
@@ -161,26 +337,56 @@ def scrape_all_pages(base_url, max_empty_pages=5, delay=None):
                         results[p] = lines
                     else:
                         print("❌ Retry failed, consider increasing PAGE_FETCH_DELAY in settings")
-                        break
+                        empty_count += 1
                 else:
-                    break
+                    # For Trakt lists, specifically handle the end-of-list marker
+                    if site_type == "trakt" and "End of list reached" in lines:
+                        print("🛑 End of list reached. Stopping.")
+                        return all_titles
+                    
+                    # For trakt and letterboxd, 404 on pages beyond the end is expected
+                    if site_type in ["trakt", "letterboxd"] and "404" in lines and p > 1:
+                        print("🛑 No more pages. Stopping.")
+                        return all_titles
+                    empty_count += 1
                 
-            if not lines:
+                # If too many empty/error pages, stop
+                if empty_count >= max_empty_pages:
+                    print("🛑 Too many errors or empty pages. Stopping.")
+                    return all_titles
+                continue
+                
+            if not lines or len(lines) == 0:
                 empty_count += 1
                 print(f"⚠️ No titles found on page {p} ({empty_count}/{max_empty_pages})")
                 if empty_count >= max_empty_pages:
                     print("🛑 No more content. Stopping.")
-                    return all_lines
+                    return all_titles
             else:
-                empty_count = 0
-                all_lines.extend(lines)
-                print(f"✅ Extracted {len(lines)} titles from page {p}")
+                # Check for duplicates when adding titles
+                new_titles = 0
+                for title in lines:
+                    if title not in seen_titles:
+                        seen_titles.add(title)
+                        all_titles.append(title)
+                        new_titles += 1
+                
+                # For Trakt, if we got no new titles, increase empty count
+                if site_type == "trakt" and new_titles == 0 and len(lines) > 0:
+                    empty_count += 1
+                    print(f"⚠️ All titles from page {p} were duplicates ({empty_count}/{max_empty_pages})")
+                    if empty_count >= max_empty_pages:
+                        print("🛑 No new content after several pages. Stopping.")
+                        return all_titles
+                else:
+                    empty_count = 0
+                    print(f"✅ Extracted {new_titles} new titles from page {p}")
         
         # Move to next batch of pages
         page += max_concurrent_pages
         time.sleep(delay)  # Use configured delay
     
-    return all_lines
+    return all_titles
 
 def search_tmdb_media(title, media_type, max_retries=3, delay=1):
     """
@@ -257,15 +463,70 @@ def match_title_worker(title):
     result = match_title_with_tmdb(title)
     return (title, result)
 
+def load_all_existing_titles():
+    """
+    Load all titles and their TMDB IDs from all existing lists in the output directory
+    Returns a dictionary mapping titles to their TMDB IDs
+    """
+    title_map = {}
+    root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
+    
+    # Walk through all files in the output directory
+    for root, _, files in os.walk(root_dir):
+        for file in files:
+            if not file.endswith('.txt'):
+                continue
+            
+            file_path = os.path.join(root, file)
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                            
+                        # Extract title and TMDB ID if present
+                        title_part = line.split("->")[0].split("[")[0].strip()
+                        tmdb_match = re.search(r'\[(?:movie:)?(\d+)\]', line)
+                        
+                        if title_part:
+                            # If we have a TMDB ID, store it
+                            if tmdb_match:
+                                tmdb_id = tmdb_match.group(1)
+                                media_type = "movie" if "movie:" in line else "tv"
+                                
+                                # Extract year if present
+                                year = extract_year_from_title(title_part)
+                                base_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title_part)
+                                
+                                # Store with the clean base title as key
+                                title_map[base_title] = {
+                                    "id": tmdb_id,
+                                    "year": year,
+                                    "type": media_type
+                                }
+            except Exception as e:
+                print(f"⚠️ Warning: Could not read file {file_path}: {str(e)}")
+    
+    print(f"📚 Loaded {len(title_map)} existing titles from all lists")
+    return title_map
+
 def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, include_year=True):
+    """Process scraping results, checking existing lists before TMDB search"""
     # Use the helper function to get the full file path
     full_output_path = get_output_filepath(output_file)
     
     # Check if the output file exists and load existing titles
     existing_titles = load_titles_from_file(full_output_path)
+    
+    # If TMDB is enabled, load all existing titles from all lists
+    all_title_map = {}
+    if enable_tmdb:
+        all_title_map = load_all_existing_titles()
 
     new_count = 0
     skipped_count = 0
+    cached_count = 0
     tmdb_results = {}
     titles_to_write = []
 
@@ -279,20 +540,40 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
         total_titles = len(titles_to_write)
         print(f"🔍 Matching {total_titles} titles with TMDB using threads...")
         
-        # Adjust worker count based on number of titles
-        max_workers = min(32, max(8, total_titles // 5))
-        print(f"⚡ Using {max_workers} worker threads for API calls...")
+        # First, check which titles already have a TMDB mapping in our database
+        titles_to_search = []
+        for title in titles_to_write:
+            # Look for the title in our existing database
+            clean_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title)
+            if clean_title in all_title_map:
+                tmdb_results[title] = all_title_map[clean_title]
+                cached_count += 1
+            else:
+                titles_to_search.append(title)
         
-        # Show progress during API calls
-        completed = 0
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_title = {executor.submit(match_title_worker, title): title for title in titles_to_write}
-            for future in as_completed(future_to_title):
-                title, result = future.result()
-                tmdb_results[title] = result
-                completed += 1
-                if completed % 10 == 0 or completed == total_titles:
-                    print(f"⏳ Progress: {completed}/{total_titles} titles matched ({completed/total_titles:.1%})")
+        if cached_count > 0:
+            print(f"✅ Found {cached_count} titles in existing lists, skipping TMDB search for these")
+        
+        if titles_to_search:
+            # Adjust worker count based on number of titles
+            max_workers = min(32, max(8, len(titles_to_search) // 5))
+            print(f"⚡ Using {max_workers} worker threads for {len(titles_to_search)} API calls...")
+            
+            # Start health check
+            health = show_health_check_start("TMDB matching", len(titles_to_search))
+            
+            # Show progress during API calls
+            completed = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_title = {executor.submit(match_title_worker, title): title for title in titles_to_search}
+                for future in as_completed(future_to_title):
+                    title, result = future.result()
+                    tmdb_results[title] = result
+                    completed += 1
+                    show_health_check_update(health, completed)
+            
+            # End health check
+            show_health_check_end(health)
 
     with open(full_output_path, "a", encoding="utf-8") as f:
         for title in titles_to_write:
@@ -315,7 +596,9 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
 
     scan_history[output_file] = {title: {"tmdb_matched": enable_tmdb} for title in titles_to_write}
     save_scan_history(scan_history)
-    return new_count, skipped_count
+    
+    # Return with cached info
+    return new_count, skipped_count, cached_count
 
 def get_output_filepath(filename):
     """Generate a full file path using the configured root directory"""
@@ -360,6 +643,7 @@ def show_health_check_start(task, total_items, interval=3.0):
                     eta = f"{eta_seconds / 60:.1f}m"
                 else:
                     eta = f"{eta_seconds / 3600:.1f}h"
+                
             else:
                 eta = "Unknown"
                 
@@ -445,6 +729,7 @@ def find_duplicate_entries_ultrafast(filepath, respect_years=True):
                                 key = f"{base_title} ({year})"
                             else:
                                 key = base_title
+                            
                         else:
                             key = title_part
                             
@@ -495,6 +780,110 @@ def remove_duplicate_lines(filepath, lines_to_keep):
     except Exception as e:
         print(f"❌ Error modifying file: {str(e)}")
         return False
+
+def process_auto_fix_errors(errors, lines, file_path):
+    """
+    Process errors in a file with TMDB lookup, using cache when possible
+    
+    Args:
+        errors: List of error entries
+        lines: File content as list of lines
+        file_path: Path to the file being processed
+    
+    Returns:
+        Number of successfully fixed errors
+    """
+    if not errors:
+        return 0
+        
+    # Load existing title mappings from all lists
+    all_title_map = load_all_existing_titles()
+    
+    # Process errors in parallel
+    error_titles = [(error['line_num'], error['title']) for error in errors]
+    print(f"🔍 Processing {len(error_titles)} error entries...")
+    
+    # First check which titles are in our cache
+    cached_fixes = 0
+    titles_to_search = []
+    line_num_to_title = {}
+    
+    for line_num, title in error_titles:
+        clean_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title)
+        if clean_title in all_title_map:
+            result = all_title_map[clean_title]
+            
+            # Update the line with the cached result
+            year_str = f" ({result['year']})" if result.get('year') else ""
+            
+            if result.get('type') == 'movie':
+                new_line = f"{title}{year_str} [movie:{result['id']}]\n"
+            else:
+                new_line = f"{title}{year_str} [{result['id']}]\n"
+                
+            lines[line_num - 1] = new_line
+            cached_fixes += 1
+        else:
+            titles_to_search.append((line_num, title))
+            line_num_to_title[line_num] = title
+    
+    if cached_fixes > 0:
+        print(f"✅ Fixed {cached_fixes} entries using cached data from existing lists")
+    
+    if not titles_to_search:
+        return cached_fixes
+        
+    # For remaining titles, search TMDB
+    print(f"🔍 Searching TMDB for {len(titles_to_search)} remaining titles...")
+    
+    # Adjust worker count
+    max_workers = min(20, max(5, len(titles_to_search) // 5))
+    
+    # Start health check for error fixing
+    err_health = show_health_check_start("Fixing errors", len(titles_to_search))
+    
+    api_success_count = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_line = {}
+        for line_num, title in titles_to_search:
+            future = executor.submit(match_title_worker, title)
+            future_to_line[future] = line_num
+        
+        completed = 0
+        for future in as_completed(future_to_line):
+            line_num = future_to_line[future]
+            title = line_num_to_title[line_num]
+            _, result = future.result()
+            
+            completed += 1
+            show_health_check_update(err_health, completed)
+            
+            if isinstance(result, dict):
+                # Construct the fixed line
+                year_str = f" ({result['year']})" if result.get('year') else ""
+                
+                # Handle different media types
+                if result.get('type') == 'movie':
+                    new_line = f"{title}{year_str} [movie:{result['id']}]\n"
+                else:
+                    new_line = f"{title}{year_str} [{result['id']}]\n"
+                
+                # Update the line in the file content
+                lines[line_num - 1] = new_line
+                api_success_count += 1
+    
+    # End health check
+    show_health_check_end(err_health)
+    
+    total_fixed = cached_fixes + api_success_count
+    if total_fixed > 0:
+        # Save changes
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        
+        print(f"✅ Fixed {total_fixed} errors: {cached_fixes} from cache, {api_success_count} from TMDB API")
+    
+    return total_fixed
 
 def process_file_queue(file_queue):
     """Process multiple files for both duplicates and errors"""
@@ -575,56 +964,9 @@ def process_file_queue(file_queue):
                 with open(file_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
                 
-                # Process errors in parallel
-                error_titles = [(error['line_num'], error['title']) for error in errors]
-                print(f"🔍 Matching {len(error_titles)} titles with TMDB...")
-                
-                # Adjust worker count
-                max_workers = min(20, max(5, len(error_titles) // 5))
-                
-                # Start health check for error fixing
-                err_health = show_health_check_start("Fixing errors", len(error_titles))
-                
-                success_count = 0
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    future_to_line = {}
-                    for line_num, title in error_titles:
-                        future = executor.submit(match_title_worker, title)
-                        future_to_line[future] = line_num
-                    
-                    completed = 0
-                    for future in as_completed(future_to_line):
-                        line_num = future_to_line[future]
-                        title, result = future.result()
-                        
-                        completed += 1
-                        show_health_check_update(err_health, completed)
-                        
-                        if isinstance(result, dict):
-                            # Construct the fixed line
-                            year_str = f" ({result['year']})" if result.get('year') else ""
-                            
-                            # Handle different media types
-                            if result.get('type') == 'movie':
-                                new_line = f"{title}{year_str} [movie:{result['id']}]\n"
-                            else:
-                                new_line = f"{title}{year_str} [{result['id']}]\n"
-                            
-                            # Update the line in the file content
-                            lines[line_num - 1] = new_line
-                            success_count += 1
-                
-                # End health check
-                show_health_check_end(err_health)
-                
-                # Save changes if any fixes were made
-                if success_count > 0:
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.writelines(lines)
-                    print(f"✅ Successfully fixed {success_count} out of {len(errors)} error entries")
-                    total_errors_fixed += success_count
-                else:
-                    print("❌ No entries could be fixed automatically")
+                # Process errors with caching
+                fixed_count = process_auto_fix_errors(errors, lines, file_path)
+                total_errors_fixed += fixed_count
             else:
                 print("ℹ️ Skipping error fixing (auto-fix disabled)")
         else:
@@ -646,6 +988,57 @@ def process_file_queue(file_queue):
     print(f"\n⏱️ Completed in {elapsed:.1f} seconds")
     
     input("\nPress Enter to continue...")
+
+def fix_errors_menu():
+    """Menu for fixing errors in list files"""
+    while True:
+        clear_terminal()
+        print("🔧 Fix Errors Menu")
+        print("1. Fix errors in a single file")
+        print("2. Return to main menu")
+
+        choice = input("\nChoose an option (1-2): ").strip()
+
+        if choice == "1":
+            filepath = input("Enter file path to fix: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"🔍 Scanning for errors in {filepath}...")
+            errors = find_error_entries(full_path)
+            
+            if not errors:
+                print("✅ No errors found!")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"⚠️ Found {len(errors)} error entries")
+            print("🤖 Auto-fix mode - will attempt to match all titles")
+            
+            # Ask for confirmation before starting the potentially time-consuming operation
+            if input("Continue with auto-fixing? (y/N): ").lower() != 'y':
+                continue
+            
+            # Read file content
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Process errors with caching
+            total_fixed = process_auto_fix_errors(errors, lines, full_path)
+            
+            # Notify if some entries couldn't be fixed
+            if total_fixed < len(errors):
+                print(f"⚠️ {len(errors) - total_fixed} entries still need manual fixing")
+            
+            input("Press Enter to continue...")
+        elif choice == "2":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
 
 def run_scraper():
     """Run the scraper for a single URL"""
@@ -677,13 +1070,15 @@ def run_scraper():
         return
     
     print(f"✅ Found {len(titles)} titles")
-    new_count, skipped_count = process_scrape_results(
+    new_count, skipped_count, cached_count = process_scrape_results(
         titles, output_file, scan_history, 
         enable_tmdb=enable_tmdb, include_year=include_year
     )
     
     elapsed = time.time() - start_time
     print(f"✅ Added {new_count} new titles, skipped {skipped_count} existing titles")
+    if cached_count > 0:
+        print(f"🔄 Used {cached_count} cached TMDB lookups from existing lists")
     print(f"⏱️ Completed in {elapsed:.1f} seconds")
 
 def run_batch_scraper():
@@ -740,13 +1135,15 @@ def run_batch_scraper():
         return
     
     print(f"✅ Found {len(all_titles)} total titles from all URLs")
-    new_count, skipped_count = process_scrape_results(
+    new_count, skipped_count, cached_count = process_scrape_results(
         all_titles, output_file, scan_history, 
         enable_tmdb=enable_tmdb, include_year=include_year
     )
     
     elapsed = time.time() - start_time
     print(f"✅ Added {new_count} new titles, skipped {skipped_count} existing titles")
+    if cached_count > 0:
+        print(f"🔄 Used {cached_count} cached TMDB lookups from existing lists")
     print(f"⏱️ Completed in {elapsed:.1f} seconds")
 
 def run_monitor_scraper():
