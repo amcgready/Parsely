@@ -336,6 +336,56 @@ def scrape_url_worker(url):
     print(f"🌐 Processing: {url}")
     return url, scrape_all_pages(url)
 
+def show_health_check_start(task, total_items, interval=3.0):
+    """Start a health check for a long-running process"""
+    import threading
+    import time
+    
+    # Create a shared state object that can be modified by threads
+    state = {"running": True, "processed": 0, "last_update": time.time()}
+    
+    def health_check_thread():
+        start_time = time.time()
+        while state["running"]:
+            elapsed = time.time() - start_time
+            processed = state["processed"]
+            rate = processed / elapsed if elapsed > 0 else 0
+            
+            # Calculate ETA
+            if rate > 0 and processed < total_items:
+                eta_seconds = (total_items - processed) / rate
+                if eta_seconds < 60:
+                    eta = f"{eta_seconds:.1f}s"
+                elif eta_seconds < 3600:
+                    eta = f"{eta_seconds / 60:.1f}m"
+                else:
+                    eta = f"{eta_seconds / 3600:.1f}h"
+            else:
+                eta = "Unknown"
+                
+            # Print status
+            print(f"\r⏳ {task}: {processed}/{total_items} ({processed/total_items*100:.1f}%) " +
+                  f"| {rate:.1f} items/sec | ETA: {eta}", end="")
+            
+            time.sleep(interval)
+    
+    # Start the health check thread
+    thread = threading.Thread(target=health_check_thread)
+    thread.daemon = True
+    thread.start()
+    
+    return state
+
+def show_health_check_update(state, processed):
+    """Update the health check with current progress"""
+    state["processed"] = processed
+    state["last_update"] = time.time()
+
+def show_health_check_end(state):
+    """End the health check"""
+    state["running"] = False
+    print()  # Print a newline to move past the last health check line
+
 def run_scraper():
     """Run the scraper for a single URL"""
     clear_terminal()
@@ -664,13 +714,26 @@ def duplicates_menu():
             lines_to_keep = set()
             lines_to_remove = set()
             
-            for title, occurrences in duplicates.items():
+            # Start health check for duplicate processing
+            health_state = show_health_check_start("Processing duplicates", len(duplicates))
+            
+            for idx, (title, occurrences) in enumerate(duplicates.items()):
                 # Keep the first occurrence
                 lines_to_keep.add(occurrences[0]['line_num'])
                 
                 # Remove all other occurrences
                 for occurrence in occurrences[1:]:
                     lines_to_remove.add(occurrence['line_num'])
+                
+                # Update health check
+                show_health_check_update(health_state, idx + 1)
+                
+                # Add some detailed feedback every 100 items
+                if (idx + 1) % 100 == 0 or idx == 0 or idx == len(duplicates) - 1:
+                    print(f"\n🔄 Processed {idx + 1}/{len(duplicates)} duplicate titles...")
+            
+            # End health check
+            show_health_check_end(health_state)
             
             # Create a set of all line numbers in the file
             with open(full_path, "r", encoding="utf-8") as f:
@@ -679,6 +742,7 @@ def duplicates_menu():
             # Lines to keep includes all lines NOT in lines_to_remove
             all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
             
+            print(f"⚙️ Removing {len(lines_to_remove)} duplicate lines from file...")
             if remove_duplicate_lines(full_path, all_lines_to_keep):
                 print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
             else:
@@ -917,22 +981,24 @@ def fix_errors_menu():
             fixed_count = 0
             success_count = 0
             
+            # Start health check
+            health_state = show_health_check_start("Processing errors", total_errors)
+            
             # Show progress during API calls
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Create a map of line_num to future result
                 future_to_line = {}
                 for line_num, title in error_titles:
                     future = executor.submit(match_title_worker, title)
-                    future_to_line[future] = line_num
+                    future_to_line[future] = (line_num, title)
                 
                 completed = 0
                 for future in as_completed(future_to_line):
-                    line_num = future_to_line[future]
+                    line_num, original_title = future_to_line[future]
                     title, result = future.result()
                     
                     completed += 1
-                    if completed % 5 == 0 or completed == total_errors:
-                        print(f"⏳ Progress: {completed}/{total_errors} titles matched ({completed/total_errors:.1%})")
+                    show_health_check_update(health_state, completed)
                     
                     if isinstance(result, dict):
                         # Construct the fixed line
@@ -947,6 +1013,9 @@ def fix_errors_menu():
                         # Update the line in the file content
                         lines[line_num - 1] = new_line
                         success_count += 1
+            
+            # End health check
+            show_health_check_end(health_state)
             
             # Save changes if any fixes were made
             if success_count > 0:
@@ -983,7 +1052,7 @@ def process_folder_for_issues(folder_path):
     
     processed_files = 0
     total_duplicates_fixed = 0
-    total_errors_fixed = 0  # Track fixed errors as well
+    total_errors_fixed = 0
     
     # Get all text files in the folder and subfolders
     file_list = []
@@ -998,16 +1067,56 @@ def process_folder_for_issues(folder_path):
     
     print(f"🔍 Found {len(file_list)} text files to process")
     
-    for file_path in file_list:
+    # Start health check for overall file processing
+    overall_health = show_health_check_start("Processing files", len(file_list), interval=5.0)
+    
+    for idx, file_path in enumerate(file_list):
         rel_path = os.path.relpath(file_path, folder_path)
-        print(f"\n🔄 Processing file: {rel_path}")
+        print(f"\n🔄 Processing file {idx+1}/{len(file_list)}: {rel_path}")
         
         # Check for duplicates first
         duplicates = find_duplicate_entries_ultrafast(file_path, respect_years=True)
         if duplicates:
-            # Handle duplicates (existing code)
-            # ...
-            pass
+            print(f"⚠️ Found {len(duplicates)} titles with duplicates")
+            
+            # Automatically create lists of lines to keep and remove
+            lines_to_keep = set()
+            lines_to_remove = set()
+            
+            # Start health check for duplicate processing
+            dup_health = show_health_check_start("Processing duplicates", len(duplicates))
+            
+            for idx, (title, occurrences) in enumerate(duplicates.items()):
+                # Keep the first occurrence
+                lines_to_keep.add(occurrences[0]['line_num'])
+                
+                # Remove all other occurrences
+                duplicate_count = 0
+                for occurrence in occurrences[1:]:
+                    lines_to_remove.add(occurrence['line_num'])
+                    duplicate_count += 1
+                
+                # Update health check
+                show_health_check_update(dup_health, idx + 1)
+            
+            # End health check for duplicates
+            show_health_check_end(dup_health)
+            
+            # Create a set of all line numbers in the file
+            with open(file_path, "r", encoding="utf-8") as f:
+                total_lines = sum(1 for _ in f)
+            
+            # Lines to keep includes all lines NOT in lines_to_remove
+            all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
+            
+            if len(lines_to_remove) > 0:
+                if remove_duplicate_lines(file_path, all_lines_to_keep):
+                    print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
+                    total_duplicates_fixed += len(lines_to_remove)
+                else:
+                    print("❌ Failed to remove duplicates")
+            else:
+                print("ℹ️ No duplicates need to be removed")
         else:
             print("✅ No duplicates found")
         
@@ -1029,6 +1138,9 @@ def process_folder_for_issues(folder_path):
                 # Adjust worker count
                 max_workers = min(20, max(5, len(error_titles) // 5))
                 
+                # Start health check for error fixing
+                err_health = show_health_check_start("Fixing errors", len(error_titles))
+                
                 success_count = 0
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
                     future_to_line = {}
@@ -1036,18 +1148,30 @@ def process_folder_for_issues(folder_path):
                         future = executor.submit(match_title_worker, title)
                         future_to_line[future] = line_num
                     
+                    completed = 0
                     for future in as_completed(future_to_line):
                         line_num = future_to_line[future]
                         title, result = future.result()
                         
+                        completed += 1
+                        show_health_check_update(err_health, completed)
+                        
                         if isinstance(result, dict):
                             # Construct the fixed line
                             year_str = f" ({result['year']})" if result.get('year') else ""
-                            new_line = f"{title}{year_str} [{result['id']}]\n"
+                            
+                            # Handle different media types
+                            if result.get('type') == 'movie':
+                                new_line = f"{title}{year_str} [movie:{result['id']}]\n"
+                            else:
+                                new_line = f"{title}{year_str} [{result['id']}]\n"
                             
                             # Update the line in the file content
                             lines[line_num - 1] = new_line
                             success_count += 1
+                
+                # End health check
+                show_health_check_end(err_health)
                 
                 # Save changes if any fixes were made
                 if success_count > 0:
@@ -1063,6 +1187,12 @@ def process_folder_for_issues(folder_path):
             print("✅ No errors found")
         
         processed_files += 1
+        show_health_check_update(overall_health, processed_files)
+        
+        print(f"✓ File processed: {rel_path}")
+    
+    # End overall health check
+    show_health_check_end(overall_health)
     
     return processed_files, total_duplicates_fixed, total_errors_fixed
 
