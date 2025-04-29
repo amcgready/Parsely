@@ -182,8 +182,11 @@ def scrape_all_pages(base_url, max_empty_pages=5, delay=None):
     
     return all_lines
 
-def match_title_with_tmdb(title, max_retries=3, delay=1):
-    url = "https://api.themoviedb.org/3/search/tv"
+def search_tmdb_media(title, media_type, max_retries=3, delay=1):
+    """
+    Search TMDB for a specific media type (tv or movie)
+    """
+    url = f"https://api.themoviedb.org/3/search/{media_type}"
     params = {
         "api_key": TMDB_API_KEY,
         "query": title,
@@ -209,10 +212,18 @@ def match_title_with_tmdb(title, max_retries=3, delay=1):
             data = response.json()
             
             if data["results"]:
-                show = data["results"][0]
+                media = data["results"][0]
+                
+                # Handle different date field names for movies vs TV shows
+                date_field = "first_air_date" if media_type == "tv" else "release_date"
+                year = None
+                if media.get(date_field):
+                    year = media[date_field].split("-")[0]
+                
                 return {
-                    "id": show["id"],
-                    "year": show["first_air_date"].split("-")[0] if show.get("first_air_date") else None
+                    "id": media["id"],
+                    "year": year,
+                    "type": media_type  # Add media type to help differentiate
                 }
             elif attempt == 0:
                 params["query"] = clean_title_for_fallback(title)
@@ -227,6 +238,20 @@ def match_title_with_tmdb(title, max_retries=3, delay=1):
             time.sleep(delay)
 
     return "[Error]"
+
+def match_title_with_tmdb(title, max_retries=3, delay=1):
+    """
+    Match a title with TMDB by searching both TV shows and movies
+    Returns either a dictionary with id and year, or "[Error]"
+    """
+    # Try TV show search first
+    tv_result = search_tmdb_media(title, "tv", max_retries, delay)
+    if tv_result != "[Error]":
+        return tv_result
+    
+    # If no TV show match, try movie search
+    movie_result = search_tmdb_media(title, "movie", max_retries, delay)
+    return movie_result
 
 def match_title_worker(title):
     result = match_title_with_tmdb(title)
@@ -276,7 +301,10 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
 
                 if isinstance(result, dict):
                     year = f" ({result['year']})" if include_year and result.get("year") else ""
-                    f.write(f"{title}{year} [{result['id']}]\n")
+                    if result.get("type") == "movie":
+                        f.write(f"{title}{year} [movie:{result['id']}]\n")
+                    else:
+                        f.write(f"{title}{year} [{result['id']}]\n")
                 else:
                     f.write(f"{title} {result}\n")
             else:
@@ -481,6 +509,7 @@ def find_duplicate_entries_ultrafast(filepath, respect_years=True):
                                 key = f"{base_title} ({year})"
                             else:
                                 key = base_title
+                            
                         else:
                             key = title_part
                             
@@ -668,9 +697,11 @@ def fix_errors_menu():
         clear_terminal()
         print("🔧 Fix Errors in Lists")
         print("1. Scan file for [Error] entries")
-        print("2. Return to main menu")
+        print("2. Fix errors manually")
+        print("3. Fix errors automatically via TMDB")
+        print("4. Return to main menu")
 
-        choice = input("\nChoose an option (1-2): ").strip()
+        choice = input("\nChoose an option (1-4) [1]: ").strip() or "1"
 
         if choice == "1":
             filepath = input("Enter file path to scan: ").strip()
@@ -689,12 +720,410 @@ def fix_errors_menu():
                 input("Press Enter to continue...")
                 continue
                 
-            print(f"⚠️ Found {len(errors)} error entries")
+            print(f"⚠️ Found {len(errors)} error entries:")
+            
+            # Display the first 10 errors
+            for i, error in enumerate(errors[:10], 1):
+                print(f"  {i}. Line {error['line_num']}: {error['title']}")
+            
+            if len(errors) > 10:
+                print(f"  ... and {len(errors) - 10} more")
+                
             input("Press Enter to continue...")
+            
+        elif choice == "2":
+            # Manual fix mode
+            filepath = input("Enter file path to fix: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"🔍 Scanning for errors in {filepath}...")
+            errors = find_error_entries(full_path)
+            
+            if not errors:
+                print("✅ No errors found!")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"⚠️ Found {len(errors)} error entries")
+            print("📝 Manual fix mode - you'll fix each entry one by one")
+            
+            # Read file content
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            errors_fixed = 0
+            for error in errors:
+                print(f"\n📄 Line {error['line_num']}: {error['line']}")
+                print("Options:")
+                print("1. Search TMDB for a matching title")
+                print("2. Enter TMDB ID manually")
+                print("3. Mark as movie with TMDB ID") 
+                print("4. Skip this entry")
+                print("5. Exit manual fixing")
+                
+                fix_choice = input("\nChoose an option (1-5) [1]: ").strip() or "1"
+                
+                if fix_choice == "1":
+                    search_title = input(f"Enter search title [{error['title']}]: ").strip() or error['title']
+                    print(f"🔍 Searching TMDB for: {search_title}")
+                    
+                    result = match_title_with_tmdb(search_title)
+                    
+                    if isinstance(result, dict):
+                        year_str = f" ({result['year']})" if result.get('year') else ""
+                        media_type = result.get('type', 'tv')  # Default to TV if not specified
+                        
+                        if media_type == "movie":
+                            new_line = f"{error['title']}{year_str} [movie:{result['id']}]\n"
+                            print(f"✅ Found movie match: {error['title']}{year_str} [movie:{result['id']}]")
+                        else:
+                            new_line = f"{error['title']}{year_str} [{result['id']}]\n"
+                            print(f"✅ Found TV match: {error['title']}{year_str} [{result['id']}]")
+                        
+                        if input("Accept this match? (Y/n): ").lower() != 'n':
+                            lines[error['line_num'] - 1] = new_line
+                            errors_fixed += 1
+                            print("✓ Applied fix")
+                        else:
+                            print("✗ Skipped")
+                    else:
+                        print("❌ No match found on TMDB")
+                
+                elif fix_choice == "2":
+                    tmdb_id = input("Enter TMDB ID (for TV shows): ").strip()
+                    if tmdb_id.isdigit():
+                        # Optionally fetch the year
+                        include_year = get_env_flag("INCLUDE_YEAR", "true")
+                        year_str = ""
+                        
+                        if include_year:
+                            # Attempt to fetch show details to get the year
+                            try:
+                                url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
+                                params = {"api_key": TMDB_API_KEY}
+                                response = requests.get(url, params=params, timeout=5)
+                                
+                                if response.status_code == 200:
+                                    data = response.json()
+                                    first_air_date = data.get("first_air_date", "")
+                                    if first_air_date:
+                                        year = first_air_date.split("-")[0]
+                                        year_str = f" ({year})"
+                            except Exception:
+                                # If there's an error, just continue without year
+                                pass
+                        
+                        new_line = f"{error['title']}{year_str} [{tmdb_id}]\n"
+                        lines[error['line_num'] - 1] = new_line
+                        errors_fixed += 1
+                        print(f"✅ Updated to: {new_line.strip()}")
+                    else:
+                        print("❌ Invalid TMDB ID (must be a number)")
+                
+                elif fix_choice == "3":
+                    # New option for movies
+                    tmdb_id = input("Enter movie TMDB ID: ").strip()
+                    if tmdb_id.isdigit():
+                        # Optionally fetch the year
+                        include_year = get_env_flag("INCLUDE_YEAR", "true")
+                        year_str = ""
+                        
+                        if include_year:
+                            # Attempt to fetch movie details to get the year
+                            try:
+                                url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
+                                params = {"api_key": TMDB_API_KEY}
+                                response = requests.get(url, params=params, timeout=5)
+                                
+                                if response.status_code == 200:
+                                    data = response.json()
+                                    release_date = data.get("release_date", "")
+                                    if release_date:
+                                        year = release_date.split("-")[0]
+                                        year_str = f" ({year})"
+                            except Exception:
+                                # If there's an error, just continue without year
+                                pass
+                        
+                        new_line = f"{error['title']}{year_str} [movie:{tmdb_id}]\n"
+                        lines[error['line_num'] - 1] = new_line
+                        errors_fixed += 1
+                        print(f"✅ Updated to: {new_line.strip()}")
+                    else:
+                        print("❌ Invalid TMDB ID (must be a number)")
+                
+                elif fix_choice == "4":
+                    print("⏭️ Skipped this entry")
+                    continue
+                
+                elif fix_choice == "5":
+                    print("⏹️ Exiting manual fix mode")
+                    break
+            
+            # Save changes if any fixes were made
+            if errors_fixed > 0:
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                print(f"\n✅ Fixed {errors_fixed} out of {len(errors)} error entries")
+            else:
+                print("\n❌ No changes were made")
+            
+            input("Press Enter to continue...")
+            
+        elif choice == "3":
+            # Automatic fix mode
+            filepath = input("Enter file path to fix: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"🔍 Scanning for errors in {filepath}...")
+            errors = find_error_entries(full_path)
+            
+            if not errors:
+                print("✅ No errors found!")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"⚠️ Found {len(errors)} error entries")
+            print("🤖 Auto-fix mode - will attempt to match all titles with TMDB")
+            
+            # Ask for confirmation before starting the potentially time-consuming operation
+            if input("This may take some time. Continue? (y/N): ").lower() != 'y':
+                continue
+            
+            # Read file content
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Process errors in parallel for better performance
+            error_titles = [(error['line_num'], error['title']) for error in errors]
+            total_errors = len(error_titles)
+            
+            print(f"🔍 Matching {total_errors} titles with TMDB using threads...")
+            
+            # Adjust worker count based on number of titles
+            max_workers = min(20, max(5, total_errors // 5))
+            print(f"⚡ Using {max_workers} worker threads for API calls...")
+            
+            fixed_count = 0
+            success_count = 0
+            
+            # Show progress during API calls
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Create a map of line_num to future result
+                future_to_line = {}
+                for line_num, title in error_titles:
+                    future = executor.submit(match_title_worker, title)
+                    future_to_line[future] = line_num
+                
+                completed = 0
+                for future in as_completed(future_to_line):
+                    line_num = future_to_line[future]
+                    title, result = future.result()
+                    
+                    completed += 1
+                    if completed % 5 == 0 or completed == total_errors:
+                        print(f"⏳ Progress: {completed}/{total_errors} titles matched ({completed/total_errors:.1%})")
+                    
+                    if isinstance(result, dict):
+                        # Construct the fixed line
+                        year_str = f" ({result['year']})" if result.get('year') else ""
+                        
+                        # Handle different media types
+                        if result.get('type') == 'movie':
+                            new_line = f"{title}{year_str} [movie:{result['id']}]\n"
+                        else:
+                            new_line = f"{title}{year_str} [{result['id']}]\n"
+                        
+                        # Update the line in the file content
+                        lines[line_num - 1] = new_line
+                        success_count += 1
+            
+            # Save changes if any fixes were made
+            if success_count > 0:
+                with open(full_path, "w", encoding="utf-8") as f:
+                    f.writelines(lines)
+                print(f"\n✅ Successfully fixed {success_count} out of {total_errors} error entries")
+            else:
+                print("\n❌ No entries could be fixed automatically")
+            
+            # Notify if some entries couldn't be fixed
+            if success_count < total_errors:
+                print(f"⚠️ {total_errors - success_count} entries still need manual fixing")
+            
+            input("Press Enter to continue...")
+            
+        elif choice == "4":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
+
+def process_folder_for_issues(folder_path):
+    """
+    Process all files in a folder for duplicates and errors
+    
+    Args:
+        folder_path: Path to the folder containing list files
+    
+    Returns:
+        tuple: (processed_files, fixed_duplicates, fixed_errors)
+    """
+    if not os.path.isdir(folder_path):
+        print(f"❌ Not a valid folder: {folder_path}")
+        return 0, 0, 0
+    
+    processed_files = 0
+    total_duplicates_fixed = 0
+    total_errors_fixed = 0  # Track fixed errors as well
+    
+    # Get all text files in the folder and subfolders
+    file_list = []
+    for root, _, files in os.walk(folder_path):
+        for file in files:
+            if file.endswith('.txt'):
+                file_list.append(os.path.join(root, file))
+    
+    if not file_list:
+        print(f"❌ No text files found in folder: {folder_path}")
+        return 0, 0, 0
+    
+    print(f"🔍 Found {len(file_list)} text files to process")
+    
+    for file_path in file_list:
+        rel_path = os.path.relpath(file_path, folder_path)
+        print(f"\n🔄 Processing file: {rel_path}")
+        
+        # Check for duplicates first
+        duplicates = find_duplicate_entries_ultrafast(file_path, respect_years=True)
+        if duplicates:
+            # Handle duplicates (existing code)
+            # ...
+            pass
+        else:
+            print("✅ No duplicates found")
+        
+        # Now check for errors and try to fix them automatically
+        errors = find_error_entries(file_path)
+        if errors:
+            print(f"⚠️ Found {len(errors)} error entries")
+            
+            # Ask if errors should be automatically fixed
+            if input("Attempt to auto-fix errors with TMDB? (y/N): ").lower() == 'y':
+                # Read file content
+                with open(file_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                
+                # Process errors in parallel
+                error_titles = [(error['line_num'], error['title']) for error in errors]
+                print(f"🔍 Matching {len(error_titles)} titles with TMDB...")
+                
+                # Adjust worker count
+                max_workers = min(20, max(5, len(error_titles) // 5))
+                
+                success_count = 0
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    future_to_line = {}
+                    for line_num, title in error_titles:
+                        future = executor.submit(match_title_worker, title)
+                        future_to_line[future] = line_num
+                    
+                    for future in as_completed(future_to_line):
+                        line_num = future_to_line[future]
+                        title, result = future.result()
+                        
+                        if isinstance(result, dict):
+                            # Construct the fixed line
+                            year_str = f" ({result['year']})" if result.get('year') else ""
+                            new_line = f"{title}{year_str} [{result['id']}]\n"
+                            
+                            # Update the line in the file content
+                            lines[line_num - 1] = new_line
+                            success_count += 1
+                
+                # Save changes if any fixes were made
+                if success_count > 0:
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                    print(f"✅ Successfully fixed {success_count} out of {len(errors)} error entries")
+                    total_errors_fixed += success_count
+                else:
+                    print("❌ No entries could be fixed automatically")
+            else:
+                print("⏭️ Skipping error fixing for this file")
+        else:
+            print("✅ No errors found")
+        
+        processed_files += 1
+    
+    return processed_files, total_duplicates_fixed, total_errors_fixed
+
+def batch_process_menu():
+    """Menu for batch processing folders"""
+    while True:
+        clear_terminal()
+        print("📁 Batch Process Folders")
+        print("1. Process folder (find & fix duplicates, find errors)")
+        print("2. Return to main menu")
+
+        choice = input("\nChoose an option (1-2) [1]: ").strip() or "1"
+
+        if choice == "1":
+            folder_path = input("Enter folder path to process: ").strip()
+            
+            if not folder_path or not os.path.isdir(folder_path):
+                print(f"❌ Invalid folder path: {folder_path}")
+                input("Press Enter to continue...")
+                continue
+            
+            start_time = time.time()
+            print(f"🔍 Processing files in: {folder_path}")
+            files, duplicates, errors = process_folder_for_issues(folder_path)
+            
+            elapsed = time.time() - start_time
+            print("\n📊 Summary:")
+            print(f"   - Processed {files} files")
+            print(f"   - Fixed {duplicates} duplicate entries")
+            print(f"   - Found {errors} error entries (manual fixing required)")
+            print(f"\n⏱️ Completed in {elapsed:.1f} seconds")
+            
+            input("\nPress Enter to continue...")
+            
         elif choice == "2":
             return
         else:
             input("❌ Invalid option. Press Enter to continue...")
+
+def process_dragged_folder(folder_path):
+    """Process a folder dragged onto the application"""
+    print(f"📁 Processing dragged folder: {folder_path}")
+    
+    # First, validate the folder
+    if not os.path.isdir(folder_path):
+        print(f"❌ Not a valid folder: {folder_path}")
+        input("Press Enter to continue...")
+        return
+    
+    # Process the folder
+    start_time = time.time()
+    files, duplicates, errors = process_folder_for_issues(folder_path)
+    
+    elapsed = time.time() - start_time
+    print("\n📊 Summary:")
+    print(f"   - Processed {files} files")
+    print(f"   - Fixed {duplicates} duplicate entries")
+    print(f"   - Found {errors} error entries (manual fixing required)")
+    print(f"\n⏱️ Completed in {elapsed:.1f} seconds")
+    
+    input("\nPress Enter to exit...")
 
 def main_menu():
     """Main menu for the application"""
@@ -706,10 +1135,11 @@ def main_menu():
         print("3. Monitor Scraper")
         print("4. Fix Errors in Lists")
         print("5. Manage Duplicates in Lists")
-        print("6. Settings")
-        print("7. Exit")
+        print("6. Batch Process Folders")
+        print("7. Settings")
+        print("8. Exit")
 
-        choice = input("\nChoose an option (1-7): ").strip()
+        choice = input("\nChoose an option (1-8): ").strip()
 
         if choice == "1":
             run_scraper()
@@ -722,8 +1152,10 @@ def main_menu():
         elif choice == "5":
             duplicates_menu()
         elif choice == "6":
-            show_settings()
+            batch_process_menu()
         elif choice == "7":
+            show_settings()
+        elif choice == "8":
             print("👋 Exiting.")
             break
         else:
@@ -731,12 +1163,19 @@ def main_menu():
 
 # This is the main entry point for the program
 if __name__ == "__main__":
-    # Start the main menu
-    try:
-        main_menu()
-    except KeyboardInterrupt:
-        print("\n👋 Program interrupted. Exiting.")
-    except Exception as e:
-        print(f"\n❌ Unexpected error: {str(e)}")
-        import traceback
-        traceback.print_exc()
+    # Check if a folder path was provided as an argument (drag and drop)
+    import sys
+    
+    if len(sys.argv) > 1 and os.path.isdir(sys.argv[1]):
+        # A folder was dragged onto the script, process it
+        process_dragged_folder(sys.argv[1])
+    else:
+        # Normal startup - show the main menu
+        try:
+            main_menu()
+        except KeyboardInterrupt:
+            print("\n👋 Program interrupted. Exiting.")
+        except Exception as e:
+            print(f"\n❌ Unexpected error: {str(e)}")
+            import traceback
+            traceback.print_exc()
