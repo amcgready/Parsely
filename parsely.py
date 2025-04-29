@@ -494,588 +494,86 @@ def run_monitor_scraper():
     print("🔍 Monitor Scraper (Coming Soon)")
     input("Press Enter to continue...")
 
-def find_error_entries(filepath):
-    """Find all [Error] entries in a file"""
-    if not os.path.exists(filepath):
-        return []
-    
-    error_entries = []
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f, 1):
-                line = line.strip()
-                if "[Error]" in line:
-                    title = line.split("[Error]")[0].strip()
-                    error_entries.append({
-                        "line_num": i,
-                        "title": title,
-                        "line": line
-                    })
-    except Exception as e:
-        print(f"❌ Error reading file {filepath}: {str(e)}")
-    
-    return error_entries
-
-def extract_year_from_title(title_line):
-    """Extract year from a title line if present"""
-    # Look for pattern like " (2023)" at the end of the title part
-    match = re.search(r'\((\d{4})\)', title_line)
-    if match:
-        return match.group(1)
-    return None
-
-def find_duplicate_entries_ultrafast(filepath, respect_years=True):
-    """
-    Ultra-optimized duplicate finder that reads the file only once,
-    drastically improving performance for large files
-    
-    If respect_years is True, titles with different years are considered different entries
-    """
-    if not os.path.exists(filepath):
-        return {}
-    
-    # Dictionary to track title occurrences with line numbers
-    title_occurrences = {}
-    
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for i, line in enumerate(f, 1):
-                # Skip empty lines
-                if not line.strip():
-                    continue
-                    
-                try:
-                    # Extract just the title part (before any "[" or "->")
-                    title_part = line.split("->")[0].split("[")[0].strip()
-                    
-                    if title_part:
-                        # If we're respecting years, include the year in the key if present
-                        if respect_years:
-                            year = extract_year_from_title(title_part)
-                            # Remove year from title for cleaner display
-                            base_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title_part)
-                            
-                            if year:
-                                key = f"{base_title} ({year})"
-                            else:
-                                key = base_title
-                            
-                        else:
-                            key = title_part
-                            
-                        if key in title_occurrences:
-                            title_occurrences[key].append({"line_num": i, "full_line": line.strip()})
-                        else:
-                            title_occurrences[key] = [{"line_num": i, "full_line": line.strip()}]
-                except Exception:
-                    continue  # Skip problematic lines
-    except Exception as e:
-        print(f"❌ Error reading file {filepath}: {str(e)}")
-        return {}
-    
-    # Filter to only titles with multiple occurrences
-    duplicates = {title: occurrences for title, occurrences in title_occurrences.items() 
-                 if len(occurrences) > 1}
-    
-    return duplicates
-
-def remove_duplicate_lines(filepath, lines_to_keep):
-    """
-    Remove duplicate entries from a file, keeping only specified line numbers
-    
-    Args:
-        filepath: Path to the file
-        lines_to_keep: Set of line numbers to keep
-    """
-    try:
-        # Read all lines
-        with open(filepath, "r", encoding="utf-8") as f:
-            all_lines = f.readlines()
-        
-        # Write back only the lines we want to keep
-        with open(filepath, "w", encoding="utf-8") as f:
-            for i, line in enumerate(all_lines, 1):
-                if i in lines_to_keep or not line.strip():  # Keep empty lines and selected lines
-                    f.write(line)
-                    
-        return True
-    except Exception as e:
-        print(f"❌ Error modifying file: {str(e)}")
-        return False
-
-def duplicates_menu():
-    """Menu for managing duplicates in list files"""
+def auto_fix_tool():
+    """Comprehensive tool to fix both duplicates and errors across multiple files in one operation"""
     while True:
         clear_terminal()
-        print("🔍 Manage Duplicates in Lists")
-        print("1. Scan file for duplicates")
-        print("2. Auto-fix duplicates (keep first occurrence)")
+        print("🔧 Auto Fix Tool - Fix Duplicates and Errors")
+        print("1. Add files to processing queue")
+        print("2. Process queued files")
         print("3. Return to main menu")
 
         choice = input("\nChoose an option (1-3) [1]: ").strip() or "1"
-
+        
         if choice == "1":
-            filepath = input("Enter file path to scan: ").strip()
-            full_path = get_output_filepath(filepath)
-            
-            if not os.path.exists(full_path):
-                print(f"❌ File not found: {full_path}")
-                input("Press Enter to continue...")
-                continue
-            
-            # Ask if different years should be considered different titles
-            respect_years = input("Treat titles with different years as different entries? (Y/n): ").strip().lower() != 'n'
-                
-            print(f"🔍 Scanning for duplicates in {filepath}...")
-            duplicates = find_duplicate_entries_ultrafast(full_path, respect_years)
-            
-            if not duplicates:
-                print("✅ No duplicates found!")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"⚠️ Found {len(duplicates)} titles with duplicates")
-            
-            # Keep track of lines to remove
-            lines_to_remove = set()
-            lines_to_keep = set()
-            
-            for title, occurrences in duplicates.items():
-                print(f"\n📄 Title: {title}")
-                print(f"   Found {len(occurrences)} occurrences:")
-                for idx, occurrence in enumerate(occurrences, 1):
-                    print(f"   {idx}. Line {occurrence['line_num']}: {occurrence['full_line']}")
-                
-                # Ask which occurrence to keep
-                while True:
-                    keep_idx = input(f"\nWhich occurrence to keep? (1-{len(occurrences)}) [1]: ").strip() or "1"
-                    try:
-                        keep_idx = int(keep_idx)
-                        if 1 <= keep_idx <= len(occurrences):
-                            break
-                        print(f"❌ Please enter a number between 1 and {len(occurrences)}")
-                    except ValueError:
-                        print("❌ Please enter a valid number")
-                
-                # Mark the chosen line to keep, all others for removal
-                for idx, occurrence in enumerate(occurrences, 1):
-                    if idx == keep_idx:
-                        lines_to_keep.add(occurrence['line_num'])
-                    else:
-                        lines_to_remove.add(occurrence['line_num'])
-                
-                if input("\nProcess next duplicate? (Y/n): ").strip().lower() == 'n':
-                    break
-            
-            # Ask if the user wants to apply the changes
-            if lines_to_remove:
-                print(f"\n⚠️ Ready to remove {len(lines_to_remove)} duplicate lines and keep {len(lines_to_keep)} lines")
-                if input("Apply changes? (y/N): ").strip().lower() == 'y':
-                    # Create a set of all line numbers in the file
-                    with open(full_path, "r", encoding="utf-8") as f:
-                        total_lines = sum(1 for _ in f)
+            file_queue = add_files_to_queue()
+            if file_queue:
+                if input(f"Process {len(file_queue)} queued files now? (Y/n): ").lower() != 'n':
+                    process_file_queue(file_queue)
                     
-                    # Lines to keep includes all lines NOT in lines_to_remove
-                    all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
-                    
-                    if remove_duplicate_lines(full_path, all_lines_to_keep):
-                        print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
-                    else:
-                        print("❌ Failed to remove duplicates")
-                else:
-                    print("❌ Changes discarded")
-            
-            input("\nPress Enter to continue...")
-            
         elif choice == "2":
-            filepath = input("Enter file path to fix: ").strip()
-            full_path = get_output_filepath(filepath)
-            
-            if not os.path.exists(full_path):
-                print(f"❌ File not found: {full_path}")
-                input("Press Enter to continue...")
-                continue
-                
-            # Ask if different years should be considered different titles
-            respect_years = input("Treat titles with different years as different entries? (Y/n): ").strip().lower() != 'n'
-            
-            print(f"🔍 Scanning for duplicates in {filepath}...")
-            duplicates = find_duplicate_entries_ultrafast(full_path, respect_years)
-            
-            if not duplicates:
-                print("✅ No duplicates found!")
-                input("Press Enter to continue...")
-                continue
-            
-            print(f"⚠️ Found {len(duplicates)} titles with duplicates")
-            print("🔧 Auto-fixing by keeping the first occurrence of each duplicate...")
-            
-            # Automatically create lists of lines to keep (first occurrence) and remove (all others)
-            lines_to_keep = set()
-            lines_to_remove = set()
-            
-            # Start health check for duplicate processing
-            health_state = show_health_check_start("Processing duplicates", len(duplicates))
-            
-            for idx, (title, occurrences) in enumerate(duplicates.items()):
-                # Keep the first occurrence
-                lines_to_keep.add(occurrences[0]['line_num'])
-                
-                # Remove all other occurrences
-                for occurrence in occurrences[1:]:
-                    lines_to_remove.add(occurrence['line_num'])
-                
-                # Update health check
-                show_health_check_update(health_state, idx + 1)
-                
-                # Add some detailed feedback every 100 items
-                if (idx + 1) % 100 == 0 or idx == 0 or idx == len(duplicates) - 1:
-                    print(f"\n🔄 Processed {idx + 1}/{len(duplicates)} duplicate titles...")
-            
-            # End health check
-            show_health_check_end(health_state)
-            
-            # Create a set of all line numbers in the file
-            with open(full_path, "r", encoding="utf-8") as f:
-                total_lines = sum(1 for _ in f)
-            
-            # Lines to keep includes all lines NOT in lines_to_remove
-            all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
-            
-            print(f"⚙️ Removing {len(lines_to_remove)} duplicate lines from file...")
-            if remove_duplicate_lines(full_path, all_lines_to_keep):
-                print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
+            # Let user add files to the queue first
+            file_queue = add_files_to_queue()
+            if file_queue:
+                process_file_queue(file_queue)
             else:
-                print("❌ Failed to remove duplicates")
+                print("❌ No files queued for processing.")
+                input("Press Enter to continue...")
                 
-            input("\nPress Enter to continue...")
-            
         elif choice == "3":
             return
         else:
             input("❌ Invalid option. Press Enter to continue...")
 
-def fix_errors_menu():
-    """Menu for fixing errors in list files"""
+def add_files_to_queue():
+    """Add multiple files to the processing queue"""
+    clear_terminal()
+    print("📂 Add Files to Processing Queue")
+    print("Enter one file path per line (empty line to finish):")
+    
+    file_queue = []
     while True:
-        clear_terminal()
-        print("🔧 Fix Errors in Lists")
-        print("1. Scan file for [Error] entries")
-        print("2. Fix errors manually")
-        print("3. Fix errors automatically via TMDB")
-        print("4. Return to main menu")
-
-        choice = input("\nChoose an option (1-4) [1]: ").strip() or "1"
-
-        if choice == "1":
-            filepath = input("Enter file path to scan: ").strip()
-            full_path = get_output_filepath(filepath)
+        file_path = input("> ").strip()
+        if not file_path:
+            break
             
-            if not os.path.exists(full_path):
-                print(f"❌ File not found: {full_path}")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"🔍 Scanning for errors in {filepath}...")
-            errors = find_error_entries(full_path)
-            
-            if not errors:
-                print("✅ No errors found!")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"⚠️ Found {len(errors)} error entries:")
-            
-            # Display the first 10 errors
-            for i, error in enumerate(errors[:10], 1):
-                print(f"  {i}. Line {error['line_num']}: {error['title']}")
-            
-            if len(errors) > 10:
-                print(f"  ... and {len(errors) - 10} more")
-                
-            input("Press Enter to continue...")
-            
-        elif choice == "2":
-            # Manual fix mode
-            filepath = input("Enter file path to fix: ").strip()
-            full_path = get_output_filepath(filepath)
-            
-            if not os.path.exists(full_path):
-                print(f"❌ File not found: {full_path}")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"🔍 Scanning for errors in {filepath}...")
-            errors = find_error_entries(full_path)
-            
-            if not errors:
-                print("✅ No errors found!")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"⚠️ Found {len(errors)} error entries")
-            print("📝 Manual fix mode - you'll fix each entry one by one")
-            
-            # Read file content
-            with open(full_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            
-            errors_fixed = 0
-            for error in errors:
-                print(f"\n📄 Line {error['line_num']}: {error['line']}")
-                print("Options:")
-                print("1. Search TMDB for a matching title")
-                print("2. Enter TMDB ID manually")
-                print("3. Mark as movie with TMDB ID") 
-                print("4. Skip this entry")
-                print("5. Exit manual fixing")
-                
-                fix_choice = input("\nChoose an option (1-5) [1]: ").strip() or "1"
-                
-                if fix_choice == "1":
-                    search_title = input(f"Enter search title [{error['title']}]: ").strip() or error['title']
-                    print(f"🔍 Searching TMDB for: {search_title}")
-                    
-                    result = match_title_with_tmdb(search_title)
-                    
-                    if isinstance(result, dict):
-                        year_str = f" ({result['year']})" if result.get('year') else ""
-                        media_type = result.get('type', 'tv')  # Default to TV if not specified
-                        
-                        if media_type == "movie":
-                            new_line = f"{error['title']}{year_str} [movie:{result['id']}]\n"
-                            print(f"✅ Found movie match: {error['title']}{year_str} [movie:{result['id']}]")
-                        else:
-                            new_line = f"{error['title']}{year_str} [{result['id']}]\n"
-                            print(f"✅ Found TV match: {error['title']}{year_str} [{result['id']}]")
-                        
-                        if input("Accept this match? (Y/n): ").lower() != 'n':
-                            lines[error['line_num'] - 1] = new_line
-                            errors_fixed += 1
-                            print("✓ Applied fix")
-                        else:
-                            print("✗ Skipped")
-                    else:
-                        print("❌ No match found on TMDB")
-                
-                elif fix_choice == "2":
-                    tmdb_id = input("Enter TMDB ID (for TV shows): ").strip()
-                    if tmdb_id.isdigit():
-                        # Optionally fetch the year
-                        include_year = get_env_flag("INCLUDE_YEAR", "true")
-                        year_str = ""
-                        
-                        if include_year:
-                            # Attempt to fetch show details to get the year
-                            try:
-                                url = f"https://api.themoviedb.org/3/tv/{tmdb_id}"
-                                params = {"api_key": TMDB_API_KEY}
-                                response = requests.get(url, params=params, timeout=5)
-                                
-                                if response.status_code == 200:
-                                    data = response.json()
-                                    first_air_date = data.get("first_air_date", "")
-                                    if first_air_date:
-                                        year = first_air_date.split("-")[0]
-                                        year_str = f" ({year})"
-                            except Exception:
-                                # If there's an error, just continue without year
-                                pass
-                        
-                        new_line = f"{error['title']}{year_str} [{tmdb_id}]\n"
-                        lines[error['line_num'] - 1] = new_line
-                        errors_fixed += 1
-                        print(f"✅ Updated to: {new_line.strip()}")
-                    else:
-                        print("❌ Invalid TMDB ID (must be a number)")
-                
-                elif fix_choice == "3":
-                    # New option for movies
-                    tmdb_id = input("Enter movie TMDB ID: ").strip()
-                    if tmdb_id.isdigit():
-                        # Optionally fetch the year
-                        include_year = get_env_flag("INCLUDE_YEAR", "true")
-                        year_str = ""
-                        
-                        if include_year:
-                            # Attempt to fetch movie details to get the year
-                            try:
-                                url = f"https://api.themoviedb.org/3/movie/{tmdb_id}"
-                                params = {"api_key": TMDB_API_KEY}
-                                response = requests.get(url, params=params, timeout=5)
-                                
-                                if response.status_code == 200:
-                                    data = response.json()
-                                    release_date = data.get("release_date", "")
-                                    if release_date:
-                                        year = release_date.split("-")[0]
-                                        year_str = f" ({year})"
-                            except Exception:
-                                # If there's an error, just continue without year
-                                pass
-                        
-                        new_line = f"{error['title']}{year_str} [movie:{tmdb_id}]\n"
-                        lines[error['line_num'] - 1] = new_line
-                        errors_fixed += 1
-                        print(f"✅ Updated to: {new_line.strip()}")
-                    else:
-                        print("❌ Invalid TMDB ID (must be a number)")
-                
-                elif fix_choice == "4":
-                    print("⏭️ Skipped this entry")
-                    continue
-                
-                elif fix_choice == "5":
-                    print("⏹️ Exiting manual fix mode")
-                    break
-            
-            # Save changes if any fixes were made
-            if errors_fixed > 0:
-                with open(full_path, "w", encoding="utf-8") as f:
-                    f.writelines(lines)
-                print(f"\n✅ Fixed {errors_fixed} out of {len(errors)} error entries")
-            else:
-                print("\n❌ No changes were made")
-            
-            input("Press Enter to continue...")
-            
-        elif choice == "3":
-            # Automatic fix mode
-            filepath = input("Enter file path to fix: ").strip()
-            full_path = get_output_filepath(filepath)
-            
-            if not os.path.exists(full_path):
-                print(f"❌ File not found: {full_path}")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"🔍 Scanning for errors in {filepath}...")
-            errors = find_error_entries(full_path)
-            
-            if not errors:
-                print("✅ No errors found!")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"⚠️ Found {len(errors)} error entries")
-            print("🤖 Auto-fix mode - will attempt to match all titles with TMDB")
-            
-            # Ask for confirmation before starting the potentially time-consuming operation
-            if input("This may take some time. Continue? (y/N): ").lower() != 'y':
-                continue
-            
-            # Read file content
-            with open(full_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            
-            # Process errors in parallel for better performance
-            error_titles = [(error['line_num'], error['title']) for error in errors]
-            total_errors = len(error_titles)
-            
-            print(f"🔍 Matching {total_errors} titles with TMDB using threads...")
-            
-            # Adjust worker count based on number of titles
-            max_workers = min(20, max(5, total_errors // 5))
-            print(f"⚡ Using {max_workers} worker threads for API calls...")
-            
-            fixed_count = 0
-            success_count = 0
-            
-            # Start health check
-            health_state = show_health_check_start("Processing errors", total_errors)
-            
-            # Show progress during API calls
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Create a map of line_num to future result
-                future_to_line = {}
-                for line_num, title in error_titles:
-                    future = executor.submit(match_title_worker, title)
-                    future_to_line[future] = (line_num, title)
-                
-                completed = 0
-                for future in as_completed(future_to_line):
-                    line_num, original_title = future_to_line[future]
-                    title, result = future.result()
-                    
-                    completed += 1
-                    show_health_check_update(health_state, completed)
-                    
-                    if isinstance(result, dict):
-                        # Construct the fixed line
-                        year_str = f" ({result['year']})" if result.get('year') else ""
-                        
-                        # Handle different media types
-                        if result.get('type') == 'movie':
-                            new_line = f"{title}{year_str} [movie:{result['id']}]\n"
-                        else:
-                            new_line = f"{title}{year_str} [{result['id']}]\n"
-                        
-                        # Update the line in the file content
-                        lines[line_num - 1] = new_line
-                        success_count += 1
-            
-            # End health check
-            show_health_check_end(health_state)
-            
-            # Save changes if any fixes were made
-            if success_count > 0:
-                with open(full_path, "w", encoding="utf-8") as f:
-                    f.writelines(lines)
-                print(f"\n✅ Successfully fixed {success_count} out of {total_errors} error entries")
-            else:
-                print("\n❌ No entries could be fixed automatically")
-            
-            # Notify if some entries couldn't be fixed
-            if success_count < total_errors:
-                print(f"⚠️ {total_errors - success_count} entries still need manual fixing")
-            
-            input("Press Enter to continue...")
-            
-        elif choice == "4":
-            return
+        full_path = get_output_filepath(file_path)
+        if os.path.exists(full_path):
+            file_queue.append(full_path)
+            print(f"✅ Added to queue: {file_path}")
         else:
-            input("❌ Invalid option. Press Enter to continue...")
+            print(f"❌ File not found: {full_path}")
+    
+    if not file_queue:
+        print("❌ No valid files added to queue.")
+    else:
+        print(f"✅ {len(file_queue)} files added to processing queue.")
+    
+    return file_queue
 
-def process_folder_for_issues(folder_path):
-    """
-    Process all files in a folder for duplicates and errors
+def process_file_queue(file_queue):
+    """Process multiple files for both duplicates and errors"""
+    # Settings
+    respect_years = input("Treat titles with different years as different entries? (Y/n): ").strip().lower() != 'n'
+    auto_fix_errors = input("Automatically fix error entries with TMDB? (Y/n): ").strip().lower() != 'n'
     
-    Args:
-        folder_path: Path to the folder containing list files
-    
-    Returns:
-        tuple: (processed_files, fixed_duplicates, fixed_errors)
-    """
-    if not os.path.isdir(folder_path):
-        print(f"❌ Not a valid folder: {folder_path}")
-        return 0, 0, 0
-    
-    processed_files = 0
+    # Stats tracking
+    total_files = len(file_queue)
     total_duplicates_fixed = 0
     total_errors_fixed = 0
+    start_time = time.time()
     
-    # Get all text files in the folder and subfolders
-    file_list = []
-    for root, _, files in os.walk(folder_path):
-        for file in files:
-            if file.endswith('.txt'):
-                file_list.append(os.path.join(root, file))
+    # Start health check for overall processing
+    overall_health = show_health_check_start("Processing files", total_files, interval=5.0)
     
-    if not file_list:
-        print(f"❌ No text files found in folder: {folder_path}")
-        return 0, 0, 0
-    
-    print(f"🔍 Found {len(file_list)} text files to process")
-    
-    # Start health check for overall file processing
-    overall_health = show_health_check_start("Processing files", len(file_list), interval=5.0)
-    
-    for idx, file_path in enumerate(file_list):
-        rel_path = os.path.relpath(file_path, folder_path)
-        print(f"\n🔄 Processing file {idx+1}/{len(file_list)}: {rel_path}")
+    for idx, file_path in enumerate(file_queue):
+        rel_path = os.path.basename(file_path)
+        print(f"\n🔄 Processing file {idx+1}/{total_files}: {rel_path}")
         
-        # Check for duplicates first
-        duplicates = find_duplicate_entries_ultrafast(file_path, respect_years=True)
+        # ----- DUPLICATES SECTION -----
+        print(f"🔍 Scanning for duplicates...")
+        duplicates = find_duplicate_entries_ultrafast(file_path, respect_years)
+        
         if duplicates:
             print(f"⚠️ Found {len(duplicates)} titles with duplicates")
             
@@ -1086,7 +584,7 @@ def process_folder_for_issues(folder_path):
             # Start health check for duplicate processing
             dup_health = show_health_check_start("Processing duplicates", len(duplicates))
             
-            for idx, (title, occurrences) in enumerate(duplicates.items()):
+            for dup_idx, (title, occurrences) in enumerate(duplicates.items()):
                 # Keep the first occurrence
                 lines_to_keep.add(occurrences[0]['line_num'])
                 
@@ -1097,7 +595,7 @@ def process_folder_for_issues(folder_path):
                     duplicate_count += 1
                 
                 # Update health check
-                show_health_check_update(dup_health, idx + 1)
+                show_health_check_update(dup_health, dup_idx + 1)
             
             # End health check for duplicates
             show_health_check_end(dup_health)
@@ -1120,13 +618,14 @@ def process_folder_for_issues(folder_path):
         else:
             print("✅ No duplicates found")
         
-        # Now check for errors and try to fix them automatically
+        # ----- ERRORS SECTION -----
+        print(f"🔍 Scanning for errors...")
         errors = find_error_entries(file_path)
+        
         if errors:
             print(f"⚠️ Found {len(errors)} error entries")
             
-            # Ask if errors should be automatically fixed
-            if input("Attempt to auto-fix errors with TMDB? (y/N): ").lower() == 'y':
+            if auto_fix_errors:
                 # Read file content
                 with open(file_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
@@ -1182,78 +681,26 @@ def process_folder_for_issues(folder_path):
                 else:
                     print("❌ No entries could be fixed automatically")
             else:
-                print("⏭️ Skipping error fixing for this file")
+                print("ℹ️ Skipping error fixing (auto-fix disabled)")
         else:
             print("✅ No errors found")
         
-        processed_files += 1
-        show_health_check_update(overall_health, processed_files)
-        
+        # Update overall progress
+        show_health_check_update(overall_health, idx + 1)
         print(f"✓ File processed: {rel_path}")
     
     # End overall health check
     show_health_check_end(overall_health)
     
-    return processed_files, total_duplicates_fixed, total_errors_fixed
-
-def batch_process_menu():
-    """Menu for batch processing folders"""
-    while True:
-        clear_terminal()
-        print("📁 Batch Process Folders")
-        print("1. Process folder (find & fix duplicates, find errors)")
-        print("2. Return to main menu")
-
-        choice = input("\nChoose an option (1-2) [1]: ").strip() or "1"
-
-        if choice == "1":
-            folder_path = input("Enter folder path to process: ").strip()
-            
-            if not folder_path or not os.path.isdir(folder_path):
-                print(f"❌ Invalid folder path: {folder_path}")
-                input("Press Enter to continue...")
-                continue
-            
-            start_time = time.time()
-            print(f"🔍 Processing files in: {folder_path}")
-            files, duplicates, errors = process_folder_for_issues(folder_path)
-            
-            elapsed = time.time() - start_time
-            print("\n📊 Summary:")
-            print(f"   - Processed {files} files")
-            print(f"   - Fixed {duplicates} duplicate entries")
-            print(f"   - Found {errors} error entries (manual fixing required)")
-            print(f"\n⏱️ Completed in {elapsed:.1f} seconds")
-            
-            input("\nPress Enter to continue...")
-            
-        elif choice == "2":
-            return
-        else:
-            input("❌ Invalid option. Press Enter to continue...")
-
-def process_dragged_folder(folder_path):
-    """Process a folder dragged onto the application"""
-    print(f"📁 Processing dragged folder: {folder_path}")
-    
-    # First, validate the folder
-    if not os.path.isdir(folder_path):
-        print(f"❌ Not a valid folder: {folder_path}")
-        input("Press Enter to continue...")
-        return
-    
-    # Process the folder
-    start_time = time.time()
-    files, duplicates, errors = process_folder_for_issues(folder_path)
-    
+    # Display summary
     elapsed = time.time() - start_time
-    print("\n📊 Summary:")
-    print(f"   - Processed {files} files")
-    print(f"   - Fixed {duplicates} duplicate entries")
-    print(f"   - Found {errors} error entries (manual fixing required)")
+    print("\n📊 SUMMARY:")
+    print(f"   - Processed {total_files} files")
+    print(f"   - Fixed {total_duplicates_fixed} duplicate entries")
+    print(f"   - Fixed {total_errors_fixed} error entries")
     print(f"\n⏱️ Completed in {elapsed:.1f} seconds")
     
-    input("\nPress Enter to exit...")
+    input("\nPress Enter to continue...")
 
 def main_menu():
     """Main menu for the application"""
@@ -1266,10 +713,11 @@ def main_menu():
         print("4. Fix Errors in Lists")
         print("5. Manage Duplicates in Lists")
         print("6. Batch Process Folders")
-        print("7. Settings")
-        print("8. Exit")
+        print("7. Auto Fix Tool")
+        print("8. Settings")
+        print("9. Exit")
 
-        choice = input("\nChoose an option (1-8): ").strip()
+        choice = input("\nChoose an option (1-9): ").strip()
 
         if choice == "1":
             run_scraper()
@@ -1284,8 +732,10 @@ def main_menu():
         elif choice == "6":
             batch_process_menu()
         elif choice == "7":
-            show_settings()
+            auto_fix_tool()
         elif choice == "8":
+            show_settings()
+        elif choice == "9":
             print("👋 Exiting.")
             break
         else:
