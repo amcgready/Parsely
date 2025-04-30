@@ -1,3 +1,4 @@
 requests
 beautifulsoup4
 python-dotenv
+selenium>=4.0.0; platform_system!="Windows" # Optional for advanced Letterboxd scraping
