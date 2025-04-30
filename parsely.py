@@ -906,8 +906,23 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
     
     # If TMDB is enabled, load all existing titles from all lists
     all_title_map = {}
+    existing_error_titles = set()
     if enable_tmdb:
         all_title_map = load_all_existing_titles()
+        
+        # Extract any error titles from the current file to force re-check
+        try:
+            if os.path.exists(full_output_path):
+                with open(full_output_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        if "[Error]" in line:
+                            # Extract the title (everything before [Error])
+                            title_part = line.split("[Error]")[0].strip()
+                            # Remove any year from the title
+                            clean_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title_part)
+                            existing_error_titles.add(clean_title)
+        except Exception as e:
+            print(f"⚠️ Warning: Problem checking for error titles: {e}")
 
     new_count = 0
     skipped_count = 0
@@ -930,6 +945,12 @@ def process_scrape_results(titles, output_file, scan_history, enable_tmdb=True, 
         for title in titles_to_write:
             # Look for the title in our existing database
             clean_title = re.sub(r'\s*\(\d{4}\)\s*$', '', title)
+            
+            # Skip cache and force re-check for previously errored titles
+            if clean_title in existing_error_titles:
+                titles_to_search.append(title)
+                continue
+                
             if clean_title in all_title_map:
                 tmdb_results[title] = all_title_map[clean_title]
                 cached_count += 1
@@ -1327,7 +1348,7 @@ def fix_errors_menu():
                 continue
                 
             print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
-            if input("Run error fixing on all monitored lists? (y/N): ").lower() != 'y':
+            if input("Run error fixing on all monitored lists? (y/N): ").lower() == 'y':
                 continue
                 
             # Process each monitored list
@@ -1366,638 +1387,441 @@ def fix_errors_menu():
         else:
             input("❌ Invalid option. Press Enter to continue...")
 
+def run_monitor_settings():
+    """Configure monitor settings like check frequency"""
+    clear_terminal()
+    print("⚙️ Monitor Settings")
+    
+    config = load_monitor_config()
+    
+    # Display current monitor interval
+    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+    print(f"Current monitor check interval: {interval_minutes} minutes")
+    
+    # Format for human readability
+    if interval_minutes < 60:
+        print(f"({interval_minutes} minutes)")
+    elif interval_minutes < 1440:
+        hours = interval_minutes / 60
+        print(f"({int(hours)} hours, {int(interval_minutes % 60)} minutes)")
+    else:
+        days = interval_minutes / 1440
+        hours = (interval_minutes % 1440) / 60
+        print(f"({int(days)} days, {int(hours)} hours)")
+    
+    print("\nOptions:")
+    print("1. Change check interval")
+    print("2. Return to monitor menu")
+    
+    choice = input("\nChoose an option (1-2): ").strip()
+    
+    if choice == "1":
+        print("\nEnter new interval:")
+        print("1. Every hour")
+        print("2. Every 6 hours")
+        print("3. Every 12 hours")
+        print("4. Every day")
+        print("5. Every week")
+        print("6. Custom interval (in minutes)")
+        
+        interval_choice = input("\nChoose an option (1-6): ").strip()
+        
+        new_interval = None
+        if interval_choice == "1":
+            new_interval = 60  # 1 hour
+        elif interval_choice == "2":
+            new_interval = 360  # 6 hours
+        elif interval_choice == "3":
+            new_interval = 720  # 12 hours
+        elif interval_choice == "4":
+            new_interval = 1440  # 24 hours
+        elif interval_choice == "5":
+            new_interval = 10080  # 1 week
+        elif interval_choice == "6":
+            # Custom interval
+            try:
+                minutes = int(input("Enter custom interval in minutes: ").strip())
+                if minutes < 15:
+                    print("⚠️ Minimum interval is 15 minutes")
+                    minutes = 15
+                new_interval = minutes
+            except ValueError:
+                print("❌ Invalid value. Using default interval.")
+                new_interval = DEFAULT_MONITOR_INTERVAL
+        else:
+            print("❌ Invalid option.")
+            input("Press Enter to continue...")
+            return
+            
+        if new_interval:
+            # Update in config
+            config["monitor_interval"] = new_interval
+            save_monitor_config(config)
+            
+            # Also update in environment for this session
+            update_env_variable("MONITOR_INTERVAL", str(new_interval))
+            
+            print(f"✅ Monitor interval updated to {new_interval} minutes")
+            
+    input("Press Enter to continue...")
+
+def run_monitor_scraper():
+    """User interface for monitoring lists"""
+    while True:
+        clear_terminal()
+        print("🔍 Monitor Scraper")
+        
+        config = load_monitor_config()
+        
+        # Check if any lists are configured
+        if not config["monitored_lists"]:
+            print("❌ No lists are currently being monitored.")
+            print("Please add lists to monitor first.")
+            if input("Would you like to add a list to monitor now? (y/N): ").lower() == 'y':
+                add_monitor_url()
+            else:
+                input("Press Enter to continue...")
+            return
+        
+        interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+        print(f"📋 Found {len(config['monitored_lists'])} monitored lists (checking every {format_minutes(interval_minutes)})")
+        
+        # Count total errors and duplicates
+        total_errors = 0
+        total_duplicates = 0
+        for list_config in config["monitored_lists"].values():
+            total_errors += list_config.get("error_count", 0)
+            total_duplicates += list_config.get("duplicate_count", 0)
+            
+        if total_errors > 0:
+            print(f"⚠️ {total_errors} total errors found across all lists")
+        if total_duplicates > 0:
+            print(f"⚠️ {total_duplicates} total duplicates found across all lists")
+        
+        print("\n1. Run monitor check now")
+        print("2. Add a URL to monitor")
+        print("3. View and manage monitored lists")
+        print("4. Check monitor progress status")
+        print("5. Configure monitor settings")
+        print("6. Return to main menu")
+        
+        choice = input("\nChoose an option (1-6): ").strip()
+        
+        if choice == "1":
+            # Run a manual check
+            force_check = input("Force check all lists regardless of timing? (y/N): ").lower() == 'y'
+            run_monitor_check(force_check=force_check)
+            input("\nCheck complete. Press Enter to continue...")
+        elif choice == "2":
+            add_monitor_url()
+        elif choice == "3":
+            manage_monitored_lists()
+        elif choice == "4":
+            check_monitor_progress()
+        elif choice == "5":
+            run_monitor_settings()
+        elif choice == "6":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
+
 def run_scraper():
     """Run the scraper for a single URL"""
     clear_terminal()
-    print("🔍 Single URL Scraper")
-    url = input("Enter URL to scrape: ").strip()
+    print("🌐 Single URL Scraper")
     
+    url = input("Enter URL to scrape: ").strip()
     if not url:
         print("❌ No URL provided.")
+        input("Press Enter to continue...")
         return
     
-    output_file = input("Enter output file name: ").strip()
+    output_file = input("Enter output file path: ").strip()
     if not output_file:
         print("❌ No output file provided.")
+        input("Press Enter to continue...")
         return
     
-    # Get settings from environment
+    # Get scraper settings from environment
     enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
     include_year = get_env_flag("INCLUDE_YEAR", "true")
     
-    scan_history = load_scan_history()
-    start_time = time.time()
+    print(f"🔍 Running scraper for: {url}")
+    print(f"📄 Output file: {output_file}")
+    print(f"🎬 TMDB matching: {'Enabled' if enable_tmdb else 'Disabled'}")
+    print(f"📅 Include year: {'Enabled' if include_year else 'Disabled'}")
     
-    print(f"🌐 Scraping titles from {url}...")
+    # Run the scraper
+    start_time = time.time()
     titles = scrape_all_pages(url)
     
     if not titles:
         print("❌ No titles found.")
+        input("Press Enter to continue...")
         return
     
-    print(f"✅ Found {len(titles)} titles")
+    print(f"✅ Found {len(titles)} titles in {time.time() - start_time:.1f} seconds")
+    
+    # Process the results
+    scan_history = load_scan_history()
     new_count, skipped_count, cached_count = process_scrape_results(
-        titles, output_file, scan_history, 
+        titles, output_file, scan_history,
         enable_tmdb=enable_tmdb, include_year=include_year
     )
     
-    elapsed = time.time() - start_time
-    print(f"✅ Added {new_count} new titles, skipped {skipped_count} existing titles")
-    if cached_count > 0:
-        print(f"🔄 Used {cached_count} cached TMDB lookups from existing lists")
-    print(f"⏱️ Completed in {elapsed:.1f} seconds")
+    # Report results
+    print(f"\n📊 Results Summary:")
+    print(f"✅ Added {new_count} new titles to {output_file}")
+    print(f"⏩ Skipped {skipped_count} existing titles")
+    if enable_tmdb and cached_count > 0:
+        print(f"💾 Found {cached_count} titles in cache (no API call needed)")
+    
+    # Check for errors and duplicates in the output file
+    full_path = get_output_filepath(output_file)
+    errors = find_error_entries(full_path)
+    if errors:
+        print(f"⚠️ Found {len(errors)} error entries")
+        if input("Would you like to attempt to fix these errors now? (y/N): ").lower() == 'y':
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            total_fixed = process_auto_fix_errors(errors, lines, full_path)
+            print(f"✅ Fixed {total_fixed} of {len(errors)} errors")
+    
+    # Check for duplicates
+    duplicates = find_duplicate_entries_ultrafast(full_path)
+    if duplicates:
+        duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values())
+        print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+        if input("Would you like to remove these duplicates now? (y/N): ").lower() == 'y':
+            lines_to_keep = set()
+            for title, occurrences in duplicates.items():
+                best_line = select_best_duplicate_line(occurrences)
+                lines_to_keep.add(best_line["line_num"])
+            
+            # Also keep non-duplicate lines
+            with open(full_path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f, 1):
+                    is_duplicate = False
+                    for title, occurrences in duplicates.items():
+                        if i in [occ["line_num"] for occ in occurrences]:
+                            is_duplicate = True
+                            break
+                    if not is_duplicate:
+                        lines_to_keep.add(i)
+            
+            remove_duplicate_lines(full_path, lines_to_keep)
+            print(f"✅ Removed {duplicate_count} duplicate entries")
+    
+    input("\nPress Enter to continue...")
 
 def run_batch_scraper():
-    """Run the scraper for multiple URLs"""
+    """Run the scraper for multiple URLs in batch mode"""
     clear_terminal()
-    print("📂 Batch URL Scraper")
-    print("Enter one URL per line (empty line to finish):")
+    print("📚 Batch URL Scraper")
+    
+    # Ask for input mode
+    print("1. Enter URLs manually")
+    print("2. Load URLs from a file")
+    print("3. Return to main menu")
+    
+    mode_choice = input("\nChoose an option (1-3): ").strip()
+    
+    if mode_choice == "3":
+        return
     
     urls = []
-    while True:
-        url = input("> ").strip()
-        if not url:
-            break
-        urls.append(url)
+    if mode_choice == "1":
+        print("\nEnter URLs (one per line, blank line when done):")
+        while True:
+            url = input().strip()
+            if not url:
+                break
+            urls.append(url)
+    elif mode_choice == "2":
+        file_path = input("Enter path to file containing URLs (one per line): ").strip()
+        try:
+            with open(file_path, "r", encoding="utf-8") as f:
+                urls = [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            print(f"❌ Error reading file: {str(e)}")
+            input("Press Enter to continue...")
+            return
+    else:
+        print("❌ Invalid choice.")
+        input("Press Enter to continue...")
+        return
     
     if not urls:
         print("❌ No URLs provided.")
+        input("Press Enter to continue...")
         return
     
-    output_file = input("Enter output file name: ").strip()
+    # Ask for output file
+    output_file = input("\nEnter output file path: ").strip()
     if not output_file:
         print("❌ No output file provided.")
+        input("Press Enter to continue...")
         return
     
-    # Get settings from environment
+    # Get scraper settings from environment
     enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
     include_year = get_env_flag("INCLUDE_YEAR", "true")
     
-    scan_history = load_scan_history()
+    print(f"\n📋 Processing {len(urls)} URLs")
+    print(f"📄 Output file: {output_file}")
+    print(f"🎬 TMDB matching: {'Enabled' if enable_tmdb else 'Disabled'}")
+    print(f"📅 Include year: {'Enabled' if include_year else 'Disabled'}")
+    
+    # Confirm
+    if input("\nStart batch processing? (Y/n): ").lower() == 'n':
+        return
+    
+    # Process each URL
+    all_titles = []
     start_time = time.time()
     
-    all_titles = []
-    
-    # Scrape in parallel
-    max_workers = min(10, len(urls))  # Cap at 10 threads
-    print(f"⚡ Using {max_workers} worker threads for URL processing")
-    
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_url = {executor.submit(scrape_url_worker, url): url for url in urls}
-        for future in as_completed(future_to_url):
-            url = future_to_url[future]
-            try:
-                url, titles = future.result()
-                if titles:
-                    print(f"✅ Found {len(titles)} titles from {url}")
-                    all_titles.extend(titles)
-                else:
-                    print(f"❌ No titles found from {url}")
-            except Exception as e:
-                print(f"❌ Error processing {url}: {str(e)}")
-    
-    if not all_titles:
-        print("❌ No titles found from any URL.")
-        return
-    
-    print(f"✅ Found {len(all_titles)} total titles from all URLs")
-    new_count, skipped_count, cached_count = process_scrape_results(
-        all_titles, output_file, scan_history, 
-        enable_tmdb=enable_tmdb, include_year=include_year
-    )
-    
-    elapsed = time.time() - start_time
-    print(f"✅ Added {new_count} new titles, skipped {skipped_count} existing titles")
-    if cached_count > 0:
-        print(f"🔄 Used {cached_count} cached TMDB lookups from existing lists")
-    print(f"⏱️ Completed in {elapsed:.1f} seconds")
-
-def run_monitor_scraper():
-    """User interface for monitoring lists"""
-    clear_terminal()
-    print("🔍 Monitor Scraper")
-    
-    config = load_monitor_config()
-    
-    # Check if any lists are configured
-    if not config["monitored_lists"]:
-        print("❌ No lists are currently being monitored.")
-        print("Please add lists to monitor first.")
-        if input("Would you like to add a list to monitor now? (y/N): ").lower() == 'y':
-            add_monitor_url()
+    for i, url in enumerate(urls, 1):
+        print(f"\n🔄 Processing URL {i}/{len(urls)}: {url}")
+        url_start_time = time.time()
+        titles = scrape_all_pages(url)
+        
+        if titles:
+            print(f"✅ Found {len(titles)} titles in {time.time() - url_start_time:.1f} seconds")
+            all_titles.extend(titles)
         else:
-            input("Press Enter to continue...")
-        return
+            print("⚠️ No titles found for this URL")
     
-    print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
-    print("1. Run monitor check now")
-    print("2. Add a URL to monitor")
-    print("3. View and manage monitored lists")
-    print("4. Return to main menu")
+    total_time = time.time() - start_time
+    print(f"\n🏁 Batch scraping complete: found {len(all_titles)} titles in {total_time:.1f} seconds")
     
-    choice = input("\nChoose an option (1-4): ").strip()
-    
-    if choice == "1":
-        # Run a manual check
-        force_check = input("Force check all lists regardless of status? (y/N): ").lower() == 'y'
-        run_monitor_check(force_check=force_check)
-        input("\nCheck complete. Press Enter to continue...")
-    elif choice == "2":
-        add_monitor_url()
-    elif choice == "3":
-        manage_monitored_lists()
-    elif choice == "4":
-        return
+    if all_titles:
+        # Process the results
+        scan_history = load_scan_history()
+        new_count, skipped_count, cached_count = process_scrape_results(
+            all_titles, output_file, scan_history,
+            enable_tmdb=enable_tmdb, include_year=include_year
+        )
+        
+        # Report results
+        print(f"\n📊 Results Summary:")
+        print(f"✅ Added {new_count} new titles to {output_file}")
+        print(f"⏩ Skipped {skipped_count} existing titles")
+        if enable_tmdb and cached_count > 0:
+            print(f"💾 Found {cached_count} titles in cache (no API call needed)")
+        
+        # Check for errors and duplicates in the output file
+        full_path = get_output_filepath(output_file)
+        errors = find_error_entries(full_path)
+        if errors:
+            print(f"⚠️ Found {len(errors)} error entries")
+            if input("Would you like to attempt to fix these errors now? (y/N): ").lower() == 'y':
+                with open(full_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                print(f"✅ Fixed {total_fixed} of {len(errors)} errors")
+        
+        # Check for duplicates
+        duplicates = find_duplicate_entries_ultrafast(full_path)
+        if duplicates:
+            duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values())
+            print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+            if input("Would you like to remove these duplicates now? (y/N): ").lower() == 'y':
+                lines_to_keep = set()
+                for title, occurrences in duplicates.items():
+                    best_line = select_best_duplicate_line(occurrences)
+                    lines_to_keep.add(best_line["line_num"])
+                
+                # Also keep non-duplicate lines
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        is_duplicate = False
+                        for title, occurrences in duplicates.items():
+                            if i in [occ["line_num"] for occ in occurrences]:
+                                is_duplicate = True
+                                break
+                        if not is_duplicate:
+                            lines_to_keep.add(i)
+                
+                remove_duplicate_lines(full_path, lines_to_keep)
+                print(f"✅ Removed {duplicate_count} duplicate entries")
     else:
-        input("❌ Invalid option. Press Enter to continue...")
+        print("❌ No titles found across all URLs.")
+    
+    input("\nBatch processing complete. Press Enter to continue...")
 
-def add_monitor_url():
-    """Add a URL to be monitored"""
-    clear_terminal()
-    print("🔗 Add URL to Monitor")
-    
-    url = input("Enter URL to monitor: ").strip()
-    if not url:
-        input("❌ No URL provided. Press Enter to continue...")
-        return
-    
-    output_file = input("Enter output file for results: ").strip()
-    if not output_file:
-        input("❌ No output file provided. Press Enter to continue...")
-        return
-    
-    # Determine site type from URL
-    site_type = determine_site_type(url)
-    if site_type == "unknown":
-        print("⚠️ This URL type may not be supported. Supported sites: trakt.tv, letterboxd.com, mdblist.com")
-        if input("Continue anyway? (y/N): ").lower() != 'y':
-            return
-    
-    # Add the URL to the monitor configuration
-    config = load_monitor_config()
-    
-    # Generate a unique ID for this monitor entry
-    monitor_id = str(int(time.time() * 1000))
-    
-    # If this is the first URL for this output file, create a new entry
-    if output_file not in config["monitored_lists"]:
-        config["monitored_lists"][output_file] = {
-            "urls": [],
-            "last_check": None,
-            "enabled": True
-        }
-    
-    # Add the URL if it's not already in the list
-    url_exists = False
-    for existing_url in config["monitored_lists"][output_file]["urls"]:
-        if existing_url["url"] == url:
-            url_exists = True
-            break
-    
-    if not url_exists:
-        config["monitored_lists"][output_file]["urls"].append({
-            "id": monitor_id,
-            "url": url,
-            "added": datetime.now().isoformat(),
-            "last_check": None,
-            "title_count": 0,  # Number of titles found in last check
-            "total_added": 0,  # Total titles added from this URL over time
-        })
-    
-    save_monitor_config(config)
-    
-    print(f"✅ Added URL to monitor with ID: {monitor_id}")
-    print(f"🎯 New titles will be saved to: {output_file}")
-    
-    # Ask if user wants to run an initial check
-    if input("Run an initial check now? (Y/n): ").lower() != 'n':
-        run_monitor_check(specific_list=output_file, force_check=True)
-    
-    input("\nPress Enter to continue...")
-
-def manage_monitored_lists():
-    """View and manage monitored lists"""
+def main_menu():
+    """Main menu for the application"""
     while True:
         clear_terminal()
-        print("📋 Manage Monitored Lists")
-        
-        config = load_monitor_config()
-        if not config["monitored_lists"]:
-            print("❌ No lists are currently being monitored.")
-            input("Press Enter to return to the previous menu...")
-            return
-        
-        # Display list of monitored lists
-        print(f"Found {len(config['monitored_lists'])} monitored lists:\n")
-        lists = list(config["monitored_lists"].keys())
-        
-        for i, output_file in enumerate(lists, 1):
-            list_config = config["monitored_lists"][output_file]
-            status = "✅ Enabled" if list_config.get("enabled", True) else "❌ Disabled"
-            url_count = len(list_config["urls"])
-            last_check = list_config.get("last_check")
-            
-            if last_check:
-                last_check_time = datetime.fromtimestamp(float(last_check))
-                time_str = last_check_time.strftime("%Y-%m-%d %H:%M")
-            else:
-                time_str = "Never"
-                
-            print(f"{i}. {output_file} - {status} - {url_count} URLs - Last check: {time_str}")
-        
-        print("\nOptions:")
-        print("0. Return to previous menu")
-        print("1. View list details")
-        print("2. Add URL to existing list")
-        print("3. Remove URL from list")
-        print("4. Enable/disable list")
-        print("5. Delete list")
-        print("6. Run check for specific list")
-        print("7. Change monitor interval")
-        
-        choice = input("\nChoose an option: ").strip()
-        
-        if choice == "0":
-            return
-        elif choice == "1":
-            # View list details
-            list_num = input("Enter list number to view: ").strip()
-            try:
-                list_num = int(list_num)
-                if 1 <= list_num <= len(lists):
-                    view_list_details(lists[list_num - 1])
-                else:
-                    input("❌ Invalid list number. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+        print("📋 Parsely - Media List Manager")
+        print("1. Run Scraper (Single URL)")
+        print("2. Batch Scraper (Multiple URLs)")
+        print("3. Monitor Scraper")
+        print("4. Fix Errors in Lists")
+        print("5. Manage Duplicates in Lists")
+        print("6. Batch Process Folders")
+        print("7. Auto Fix Tool")
+        print("8. Settings")
+        print("9. Exit")
+
+        choice = input("\nChoose an option (1-9): ").strip()
+
+        if choice == "1":
+            run_scraper()
         elif choice == "2":
-            # Add URL to existing list
-            list_num = input("Enter list number to add URL to: ").strip()
-            try:
-                list_num = int(list_num)
-                if 1 <= list_num <= len(lists):
-                    add_url_to_list(lists[list_num - 1])
-                else:
-                    input("❌ Invalid list number. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+            run_batch_scraper()  # Now properly defined
         elif choice == "3":
-            # Remove URL from list
-            list_num = input("Enter list number to remove URL from: ").strip()
-            try:
-                list_num = int(list_num)
-                if 1 <= list_num <= len(lists):
-                    remove_url_from_list(lists[list_num - 1])
-                else:
-                    input("❌ Invalid list number. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+            run_monitor_scraper()
         elif choice == "4":
-            # Enable/disable list
-            list_num = input("Enter list number to toggle enable/disable: ").strip()
-            try:
-                list_num = int(list_num)
-                if 1 <= list_num <= len(lists):
-                    toggle_list_enabled(lists[list_num - 1])
-                else:
-                    input("❌ Invalid list number. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+            fix_errors_menu()
         elif choice == "5":
-            # Delete list
-            list_num = input("Enter list number to delete: ").strip()
-            try:
-                list_num = int(list_num)
-                if 1 <= list_num <= len(lists):
-                    delete_monitored_list(lists[list_num - 1])
-                else:
-                    input("❌ Invalid list number. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+            duplicates_menu()  # This function also needs to be implemented
         elif choice == "6":
-            # Run check for specific list
-            list_num = input("Enter list number to check: ").strip()
-            try:
-                list_num = int(list_num)
-                if 1 <= list_num <= len(lists):
-                    force = input("Force check regardless of timing? (y/N): ").lower() == 'y'
-                    run_monitor_check(specific_list=lists[list_num - 1], force_check=force)
-                    input("Press Enter to continue...")
-                else:
-                    input("❌ Invalid list number. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+            batch_process_menu()  # This function also needs to be implemented
         elif choice == "7":
-            # Change monitor interval
-            new_interval = input("Enter new interval in minutes (default 1440 = 24 hours): ").strip()
-            try:
-                new_interval = int(new_interval)
-                if new_interval > 0:
-                    config["monitor_interval"] = new_interval
-                    save_monitor_config(config)
-                    input(f"✅ Monitor interval updated to {new_interval} minutes. Press Enter to continue...")
-                else:
-                    input("❌ Interval must be greater than 0. Press Enter to continue...")
-            except ValueError:
-                input("❌ Invalid input. Press Enter to continue...")
+            auto_fix_tool()  # This function also needs to be implemented
+        elif choice == "8":
+            show_settings()  # This function also needs to be implemented
+        elif choice == "9":
+            print("👋 Exiting.")
+            break
         else:
             input("❌ Invalid option. Press Enter to continue...")
 
-def view_list_details(output_file):
-    """View details of a specific monitored list"""
-    config = load_monitor_config()
-    list_config = config["monitored_lists"].get(output_file)
-    
-    if not list_config:
-        input(f"❌ List '{output_file}' not found. Press Enter to continue...")
-        return
-    
-    clear_terminal()
-    print(f"📋 List Details: {output_file}")
-    
-    # Basic list info
-    status = "✅ Enabled" if list_config.get("enabled", True) else "❌ Disabled"
-    print(f"Status: {status}")
-    
-    last_check = list_config.get("last_check")
-    if last_check:
-        last_check_time = datetime.fromtimestamp(float(last_check))
-        print(f"Last check: {last_check_time.strftime('%Y-%m-%d %H:%M')}")
-    else:
-        print("Last check: Never")
-    
-    # URLs in this list
-    print(f"\nURLs in this list ({len(list_config['urls'])}):")
-    for i, url_entry in enumerate(list_config["urls"], 1):
-        url = url_entry["url"]
-        title_count = url_entry.get("title_count", 0)
-        total_added = url_entry.get("total_added", 0)
-        
-        # Format the URL to fit nicely in console
-        max_url_length = 60
-        display_url = url if len(url) <= max_url_length else url[:max_url_length-3] + "..."
-        
-        print(f"{i}. {display_url}")
-        print(f"   ID: {url_entry.get('id', 'N/A')}")
-        print(f"   Last fetch: {title_count} titles")
-        print(f"   Total added: {total_added} titles")
-        
-        # Show when this URL was last checked
-        last_url_check = url_entry.get("last_check")
-        if last_url_check:
-            last_url_time = datetime.fromtimestamp(float(last_url_check))
-            print(f"   Last checked: {last_url_time.strftime('%Y-%m-%d %H:%M')}")
-        else:
-            print("   Last checked: Never")
-        
-        # Add a spacer between URLs
-        if i < len(list_config["urls"]):
-            print()
-    
-    input("\nPress Enter to return...")
-
-def add_url_to_list(output_file):
-    """Add a URL to an existing monitored list"""
-    config = load_monitor_config()
-    if output_file not in config["monitored_lists"]:
-        input(f"❌ List '{output_file}' not found. Press Enter to continue...")
-        return
-    
-    clear_terminal()
-    print(f"🔗 Add URL to '{output_file}'")
-    
-    url = input("Enter URL to monitor: ").strip()
-    if not url:
-        input("❌ No URL provided. Press Enter to continue...")
-        return
-    
-    # Determine site type from URL
-    site_type = determine_site_type(url)
-    if site_type == "unknown":
-        print("⚠️ This URL type may not be supported. Supported sites: trakt.tv, letterboxd.com, mdblist.com")
-        if input("Continue anyway? (y/N): ").lower() != 'y':
-            return
-    
-    # Generate a unique ID for this monitor entry
-    monitor_id = str(int(time.time() * 1000))
-    
-    # Add the URL if it's not already in the list
-    url_exists = False
-    for existing_url in config["monitored_lists"][output_file]["urls"]:
-        if existing_url["url"] == url:
-            url_exists = True
-            input(f"⚠️ This URL is already in the list. Press Enter to continue...")
-            break
-    
-    if not url_exists:
-        config["monitored_lists"][output_file]["urls"].append({
-            "id": monitor_id,
-            "url": url,
-            "added": datetime.now().isoformat(),
-            "last_check": None,
-            "title_count": 0,
-            "total_added": 0,
-        })
-        
-        save_monitor_config(config)
-        print(f"✅ Added URL to list with ID: {monitor_id}")
-        
-        # Ask if user wants to run an initial check
-        if input("Run an initial check now? (Y/n): ").lower() != 'n':
-            run_monitor_check(specific_list=output_file, force_check=True)
-    
-    input("\nPress Enter to continue...")
-
-def remove_url_from_list(output_file):
-    """Remove a URL from a monitored list"""
-    config = load_monitor_config()
-    if output_file not in config["monitored_lists"]:
-        input(f"❌ List '{output_file}' not found. Press Enter to continue...")
-        return
-    
-    list_config = config["monitored_lists"][output_file]
-    if not list_config["urls"]:
-        input("❌ This list has no URLs. Press Enter to continue...")
-        return
-    
-    clear_terminal()
-    print(f"🗑️ Remove URL from '{output_file}'")
-    
-    # Display URLs in this list
-    print("URLs in this list:")
-    for i, url_entry in enumerate(list_config["urls"], 1):
-        url = url_entry["url"]
-        print(f"{i}. {url}")
-    
-    # Get user choice
-    try:
-        choice = int(input("\nEnter number of URL to remove (0 to cancel): "))
-        if choice == 0:
-            return
-        
-        if 1 <= choice <= len(list_config["urls"]):
-            # Ask for confirmation
-            url_to_remove = list_config["urls"][choice - 1]["url"]
-            if input(f"Are you sure you want to remove {url_to_remove}? (y/N): ").lower() == 'y':
-                del list_config["urls"][choice - 1]
-                save_monitor_config(config)
-                print("✅ URL removed successfully")
-                
-                # If this was the last URL, ask if they want to delete the list
-                if not list_config["urls"]:
-                    if input("This list has no more URLs. Delete the entire list? (y/N): ").lower() == 'y':
-                        del config["monitored_lists"][output_file]
-                        save_monitor_config(config)
-                        print(f"✅ List '{output_file}' deleted")
-        else:
-            print("❌ Invalid selection")
-    except ValueError:
-        print("❌ Invalid input, expected a number")
-    
-    input("\nPress Enter to continue...")
-
-def toggle_list_enabled(output_file):
-    """Toggle the enabled state of a monitored list"""
-    config = load_monitor_config()
-    if output_file not in config["monitored_lists"]:
-        input(f"❌ List '{output_file}' not found. Press Enter to continue...")
-        return
-    
-    # Toggle the enabled state
-    current_state = config["monitored_lists"][output_file].get("enabled", True)
-    config["monitored_lists"][output_file]["enabled"] = not current_state
-    
-    save_monitor_config(config)
-    
-    new_state = "enabled" if not current_state else "disabled"
-    input(f"✅ List '{output_file}' is now {new_state}. Press Enter to continue...")
-
-def delete_monitored_list(output_file):
-    """Delete a monitored list"""
-    config = load_monitor_config()
-    if output_file not in config["monitored_lists"]:
-        input(f"❌ List '{output_file}' not found. Press Enter to continue...")
-        return
-    
-    # Ask for confirmation
-    if input(f"Are you sure you want to delete the list '{output_file}'? (y/N): ").lower() == 'y':
-        del config["monitored_lists"][output_file]
-        save_monitor_config(config)
-        input(f"✅ List '{output_file}' deleted. Press Enter to continue...")
-    else:
-        input("Operation cancelled. Press Enter to continue...")
-
-def run_monitor_check(force_check=False, specific_list=None):
+def select_best_duplicate_line(occurrences):
     """
-    Run monitoring check for all configured lists or a specific list.
-    
-    Args:
-        force_check (bool): If True, check all lists regardless of last check time
-        specific_list (str): If provided, only check this specific list
+    Select the best line from a set of duplicates
+    Prefer lines with TMDB IDs over those with errors
     """
-    clear_terminal()
-    print("🔄 Running Monitor Check")
+    # First priority: prefer lines with TMDB IDs
+    lines_with_tmdb = [line for line in occurrences if re.search(r'\[(?:movie:)?(\d+)\]', line["full_line"])]
     
-    config = load_monitor_config()
-    if not config["monitored_lists"]:
-        print("❌ No lists are currently being monitored.")
-        return
+    if lines_with_tmdb:
+        # If we have lines with TMDB IDs, prefer ones without "Error"
+        error_free_lines = [line for line in lines_with_tmdb if "[Error]" not in line["full_line"]]
+        if error_free_lines:
+            return error_free_lines[0]
+        return lines_with_tmdb[0]
     
-    # Get monitor interval in minutes
-    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
-    print(f"ℹ️ Monitor interval: {interval_minutes} minutes")
+    # If no TMDB IDs, prefer lines without "Error"
+    error_free_lines = [line for line in occurrences if "[Error]" not in line["full_line"]]
+    if error_free_lines:
+        return error_free_lines[0]
     
-    # Track overall progress
-    total_new_items = 0
-    processed_lists = 0
-    
-    # Get the list of lists to process
-    lists_to_process = []
-    if specific_list:
-        if specific_list in config["monitored_lists"]:
-            lists_to_process = [specific_list]
-        else:
-            print(f"❌ List '{specific_list}' not found in monitored lists.")
-            return
+    # If all have errors, just return the first one
+    return occurrences[0]
+
+def format_minutes(minutes):
+    """Format minutes into a readable duration string"""
+    if minutes < 60:
+        return f"{int(minutes)}m"
+    elif minutes < 1440:  # Less than 24 hours
+        hours = minutes / 60
+        return f"{int(hours)}h {int(minutes % 60)}m"
     else:
-        lists_to_process = list(config["monitored_lists"].keys())
-    
-    # Process each list
-    for output_file in lists_to_process:
-        list_config = config["monitored_lists"][output_file]
-        
-        if not list_config.get("enabled", True) and not force_check:
-            print(f"⏭️ Skipping disabled list: {output_file}")
-            continue
-        
-        # Check if it's time to update this list
-        last_check = list_config.get("last_check")
-        current_time = datetime.now().timestamp()
-        
-        # Skip if it's not time yet, unless force_check is True
-        if not force_check and last_check:
-            last_check_time = float(last_check)
-            time_since_check = (current_time - last_check_time) / 60  # Convert to minutes
-            if time_since_check < interval_minutes:
-                time_remaining = interval_minutes - time_since_check
-                print(f"⏭️ Skipping {output_file} - checked {time_since_check:.1f} minutes ago (next check in {time_remaining:.1f} minutes)")
-                continue
-        
-        print(f"\n📝 Processing list: {output_file}")
-        scan_history = load_scan_history()
-        
-        # Process each URL for this list
-        all_titles = []
-        for url_entry in list_config["urls"]:
-            url = url_entry["url"]
-            print(f"🌐 Fetching: {url}")
-            
-            start_time = time.time()
-            titles = scrape_all_pages(url)
-            
-            url_entry["last_check"] = current_time
-            url_entry["title_count"] = len(titles) if titles else 0
-            
-            elapsed = time.time() - start_time
-            print(f"✅ Found {len(titles) if titles else 0} titles in {elapsed:.1f} seconds")
-            
-            if titles:
-                all_titles.extend(titles)
-        
-        # Update the last check time for this list
-        list_config["last_check"] = current_time
-        
-        # Save merged results to the output file
-        if all_titles:
-            print(f"📊 Processing {len(all_titles)} total titles from all URLs")
-            
-            # Get settings from environment
-            enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
-            include_year = get_env_flag("INCLUDE_YEAR", "true")
-            
-            new_count, skipped_count, cached_count = process_scrape_results(
-                all_titles, output_file, scan_history,
-                enable_tmdb=enable_tmdb, include_year=include_year
-            )
-            
-            print(f"✅ Added {new_count} new titles to {output_file}")
-            
-            # Update total added count for each URL
-            for url_entry in list_config["urls"]:
-                url_entry["total_added"] = url_entry.get("total_added", 0) + (new_count // len(list_config["urls"]))
-            
-            total_new_items += new_count
-        else:
-            print("⚠️ No titles found from any URL in this list")
-        
-        processed_lists += 1
-    
-    # Update the last overall run time
-    config["last_run"] = current_time
-    save_monitor_config(config)
-    
-    print(f"\n✅ Monitor check complete: processed {processed_lists} lists, added {total_new_items} new items")
-    return total_new_items
+        days = minutes / 1440
+        hours = (minutes % 1440) / 60
+        return f"{int(days)}d {int(hours)}h"
 
 def main_menu():
     """Main menu for the application"""
