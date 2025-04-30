@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+import os
+import re
+import json
+import time
+import threading
+import traceback
 import requests
 from bs4 import BeautifulSoup
-import os
-import time
-import json
-import re
 from dotenv import load_dotenv
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 
 # --------- ENV MANAGEMENT ---------
 ENV_FILE = ".env"
@@ -67,6 +70,30 @@ if not TMDB_API_KEY:
     raise ValueError("TMDB_API_KEY not found in .env")
 
 SCAN_HISTORY_FILE = "scan_history.json"
+MONITOR_CONFIG_FILE = "monitor_config.json"
+DEFAULT_MONITOR_INTERVAL = 1440  # 24 hours by default
+
+def load_monitor_config():
+    """Load the monitor configuration from file"""
+    if os.path.exists(MONITOR_CONFIG_FILE):
+        try:
+            with open(MONITOR_CONFIG_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print(f"⚠️ Warning: {MONITOR_CONFIG_FILE} contains invalid JSON. Creating new configuration.")
+    
+    # Return default empty configuration
+    return {
+        "monitor_interval": DEFAULT_MONITOR_INTERVAL,
+        "last_run": None,
+        "enabled": True,
+        "monitored_lists": {}
+    }
+
+def save_monitor_config(config):
+    """Save the monitor configuration to file"""
+    with open(MONITOR_CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
 def clear_terminal():
     os.system("cls" if os.name == "nt" else "clear")
@@ -1249,10 +1276,11 @@ def fix_errors_menu():
         clear_terminal()
         print("🔧 Fix Errors Menu")
         print("1. Fix errors in a single file")
-        print("2. Manual TMDB search for a title")
-        print("3. Return to main menu")
+        print("2. Fix errors in all monitored list files")
+        print("3. Manual TMDB search for a title")
+        print("4. Return to main menu")
 
-        choice = input("\nChoose an option (1-3): ").strip()
+        choice = input("\nChoose an option (1-4): ").strip()
 
         if choice == "1":
             filepath = input("Enter file path to fix: ").strip()
@@ -1291,307 +1319,49 @@ def fix_errors_menu():
             
             input("Press Enter to continue...")
         elif choice == "2":
-            manual_tmdb_search()
-        elif choice == "3":
-            return
-        else:
-            input("❌ Invalid option. Press Enter to continue...")
-
-def manual_tmdb_search():
-    """Manually search TMDB for a title and update its entry in a file"""
-    clear_terminal()
-    print("🔍 Manual TMDB Search")
-    
-    # Get the file path
-    filepath = input("Enter file path to modify: ").strip()
-    full_path = get_output_filepath(filepath)
-    
-    if not os.path.exists(full_path):
-        print(f"❌ File not found: {full_path}")
-        input("Press Enter to continue...")
-        return
-    
-    # Get the title to search for
-    search_title = input("Enter title to search on TMDB: ").strip()
-    if not search_title:
-        print("❌ No title provided.")
-        input("Press Enter to continue...")
-        return
-    
-    # First check if we should search for TV show or movie
-    print("\nSearch as:")
-    print("1. TV Show")
-    print("2. Movie")
-    print("3. Try both (TV first, then Movie)")
-    
-    media_choice = input("Choose an option (1-3) [3]: ").strip() or "3"
-    
-    # Perform the TMDB search
-    print(f"\n🔍 Searching TMDB for '{search_title}'...")
-    result = None
-    
-    if media_choice == "1":
-        # Search for TV shows only
-        result = search_tmdb_media(search_title, "tv")
-    elif media_choice == "2":
-        # Search for movies only
-        result = search_tmdb_media(search_title, "movie")
-    else:
-        # Try both (default)
-        result = match_title_with_tmdb(search_title)
-    
-    # Show results
-    if result == "[Error]":
-        print("❌ No matches found on TMDB.")
-        input("Press Enter to continue...")
-        return
-    
-    # Display the matching result
-    media_type = result.get('type', 'tv')
-    year = result.get('year', 'Unknown year')
-    tmdb_id = result.get('id')
-    
-    print(f"\n✅ Found match on TMDB:")
-    print(f"Title: {search_title}")
-    print(f"Type: {media_type.upper()}")
-    print(f"Year: {year}")
-    print(f"TMDB ID: {tmdb_id}")
-    
-    # Ask for confirmation before updating the file
-    if input("\nUpdate this entry in the file? (y/N): ").lower() != 'y':
-        input("Operation cancelled. Press Enter to continue...")
-        return
-    
-    # Read file content
-    with open(full_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
-    
-    # Look for matching lines
-    matches = []
-    for i, line in enumerate(lines):
-        if search_title.lower() in line.lower():
-            matches.append((i, line.strip()))
-    
-    # If multiple matches found, let the user choose which one to update
-    match_index = None
-    if len(matches) > 1:
-        print(f"\nFound {len(matches)} lines with matching titles:")
-        for idx, (line_num, line_content) in enumerate(matches):
-            print(f"{idx+1}. Line {line_num+1}: {line_content}")
-        
-        choice = input("\nChoose a line to update (number) or 0 to cancel: ")
-        try:
-            choice_num = int(choice)
-            if choice_num < 1 or choice_num > len(matches):
-                if choice_num != 0:  # 0 is cancel
-                    print("❌ Invalid choice.")
+            # Fix errors in all monitored lists
+            config = load_monitor_config()
+            if not config["monitored_lists"]:
+                print("❌ No lists are currently being monitored.")
                 input("Press Enter to continue...")
-                return
-            
-            match_index = matches[choice_num-1][0] if choice_num > 0 else None
-        except ValueError:
-            print("❌ Invalid input.")
-            input("Press Enter to continue...")
-            return
-    elif len(matches) == 1:
-        match_index = matches[0][0]
-    else:
-        # No exact matches, ask if the user wants to append a new entry
-        print("⚠️ No matching lines found in the file.")
-        if input("Would you like to append the entry as a new line? (y/N): ").lower() == 'y':
-            # Create a new entry and append to the file
-            year_str = f" ({year})" if year and year != "Unknown year" else ""
-            if media_type == "movie":
-                new_line = f"{search_title}{year_str} [movie:{tmdb_id}]\n"
-            else:
-                new_line = f"{search_title}{year_str} [{tmdb_id}]\n"
-            
-            with open(full_path, "a", encoding="utf-8") as f:
-                f.write(new_line)
-            
-            print(f"✅ Added new entry: {new_line.strip()}")
-            input("Press Enter to continue...")
-            return
-        else:
-            input("Operation cancelled. Press Enter to continue...")
-            return
-    
-    # Update the matching line
-    if match_index is not None:
-        # Extract original title from the line (preserve the exact title)
-        original_title = lines[match_index].split("->")[0].split("[")[0].strip()
-        
-        year_str = f" ({year})" if year and year != "Unknown year" else ""
-        if media_type == "movie":
-            new_line = f"{original_title}{year_str} [movie:{tmdb_id}]\n"
-        else:
-            new_line = f"{original_title}{year_str} [{tmdb_id}]\n"
-        
-        # Update the line
-        lines[match_index] = new_line
-        
-        # Save the changes
-        with open(full_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
-        
-        print(f"✅ Updated entry: {new_line.strip()}")
-    
-    input("Press Enter to continue...")
-
-def process_file_queue(file_queue):
-    """Process multiple files for both duplicates and errors"""
-    # Settings
-    respect_years = input("Treat titles with different years as different entries? (Y/n): ").strip().lower() != 'n'
-    auto_fix_errors = input("Automatically fix error entries with TMDB? (Y/n): ").strip().lower() != 'n'
-    
-    # Stats tracking
-    total_files = len(file_queue)
-    total_duplicates_fixed = 0
-    total_errors_fixed = 0
-    start_time = time.time()
-    
-    # Start health check for overall processing
-    overall_health = show_health_check_start("Processing files", total_files, interval=5.0)
-    
-    for idx, file_path in enumerate(file_queue):
-        rel_path = os.path.basename(file_path)
-        print(f"\n🔄 Processing file {idx+1}/{total_files}: {rel_path}")
-        
-        # ----- DUPLICATES SECTION -----
-        print(f"🔍 Scanning for duplicates...")
-        duplicates = find_duplicate_entries_ultrafast(file_path, respect_years)
-        
-        if duplicates:
-            print(f"⚠️ Found {len(duplicates)} titles with duplicates")
-            
-            # Automatically create lists of lines to keep and remove
-            lines_to_keep = set()
-            lines_to_remove = set()
-            
-            # Start health check for duplicate processing
-            dup_health = show_health_check_start("Processing duplicates", len(duplicates))
-            
-            for dup_idx, (title, occurrences) in enumerate(duplicates.items()):
-                # Keep the first occurrence
-                lines_to_keep.add(occurrences[0]['line_num'])
+                continue
                 
-                # Remove all other occurrences
-                duplicate_count = 0
-                for occurrence in occurrences[1:]:
-                    lines_to_remove.add(occurrence['line_num'])
-                    duplicate_count += 1
+            print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
+            if input("Run error fixing on all monitored lists? (y/N): ").lower() != 'y':
+                continue
                 
-                # Update health check
-                show_health_check_update(dup_health, dup_idx + 1)
-            
-            # End health check for duplicates
-            show_health_check_end(dup_health)
-            
-            # Create a set of all line numbers in the file
-            with open(file_path, "r", encoding="utf-8") as f:
-                total_lines = sum(1 for _ in f)
-            
-            # Lines to keep includes all lines NOT in lines_to_remove
-            all_lines_to_keep = set(range(1, total_lines + 1)) - lines_to_remove
-            
-            if len(lines_to_remove) > 0:
-                if remove_duplicate_lines(file_path, all_lines_to_keep):
-                    print(f"✅ Successfully removed {len(lines_to_remove)} duplicates")
-                    total_duplicates_fixed += len(lines_to_remove)
-                else:
-                    print("❌ Failed to remove duplicates")
-            else:
-                print("ℹ️ No duplicates need to be removed")
-        else:
-            print("✅ No duplicates found")
-        
-        # ----- ERRORS SECTION -----
-        print(f"🔍 Scanning for errors...")
-        errors = find_error_entries(file_path)
-        
-        if errors:
-            print(f"⚠️ Found {len(errors)} error entries")
-            
-            if auto_fix_errors:
+            # Process each monitored list
+            for output_file in config["monitored_lists"]:
+                full_path = get_output_filepath(output_file)
+                print(f"\n🔍 Processing {output_file}...")
+                
+                if not os.path.exists(full_path):
+                    print(f"❌ File not found: {full_path}")
+                    continue
+                    
+                # Find errors
+                errors = find_error_entries(full_path)
+                if not errors:
+                    print("✅ No errors found!")
+                    continue
+                    
+                print(f"⚠️ Found {len(errors)} error entries")
+                
                 # Read file content
-                with open(file_path, "r", encoding="utf-8") as f:
+                with open(full_path, "r", encoding="utf-8") as f:
                     lines = f.readlines()
                 
                 # Process errors with caching
-                fixed_count = process_auto_fix_errors(errors, lines, file_path)
-                total_errors_fixed += fixed_count
-            else:
-                print("ℹ️ Skipping error fixing (auto-fix disabled)")
-        else:
-            print("✅ No errors found")
-        
-        # Update overall progress
-        show_health_check_update(overall_health, idx + 1)
-        print(f"✓ File processed: {rel_path}")
-    
-    # End overall health check
-    show_health_check_end(overall_health)
-    
-    # Display summary
-    elapsed = time.time() - start_time
-    print("\n📊 SUMMARY:")
-    print(f"   - Processed {total_files} files")
-    print(f"   - Fixed {total_duplicates_fixed} duplicate entries")
-    print(f"   - Fixed {total_errors_fixed} error entries")
-    print(f"\n⏱️ Completed in {elapsed:.1f} seconds")
-    
-    input("\nPress Enter to continue...")
-
-def fix_errors_menu():
-    """Menu for fixing errors in list files"""
-    while True:
-        clear_terminal()
-        print("🔧 Fix Errors Menu")
-        print("1. Fix errors in a single file")
-        print("2. Manual TMDB search for a title")
-        print("3. Return to main menu")
-
-        choice = input("\nChoose an option (1-3): ").strip()
-
-        if choice == "1":
-            filepath = input("Enter file path to fix: ").strip()
-            full_path = get_output_filepath(filepath)
-            
-            if not os.path.exists(full_path):
-                print(f"❌ File not found: {full_path}")
-                input("Press Enter to continue...")
-                continue
+                total_fixed = process_auto_fix_errors(errors, lines, full_path)
                 
-            print(f"🔍 Scanning for errors in {filepath}...")
-            errors = find_error_entries(full_path)
-            
-            if not errors:
-                print("✅ No errors found!")
-                input("Press Enter to continue...")
-                continue
-                
-            print(f"⚠️ Found {len(errors)} error entries")
-            print("🤖 Auto-fix mode - will attempt to match all titles")
-            
-            # Ask for confirmation before starting the potentially time-consuming operation
-            if input("Continue with auto-fixing? (y/N): ").lower() != 'y':
-                continue
-            
-            # Read file content
-            with open(full_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()
-            
-            # Process errors with caching
-            total_fixed = process_auto_fix_errors(errors, lines, full_path)
-            
-            # Notify if some entries couldn't be fixed
-            if total_fixed < len(errors):
-                print(f"⚠️ {len(errors) - total_fixed} entries still need manual fixing")
-            
-            input("Press Enter to continue...")
-        elif choice == "2":
-            manual_tmdb_search()
+                # Notify if some entries couldn't be fixed
+                if total_fixed < len(errors):
+                    print(f"⚠️ {len(errors) - total_fixed} entries still need manual fixing")
+                    
+            input("\nCompleted processing all lists. Press Enter to continue...")
         elif choice == "3":
+            manual_tmdb_search()
+        elif choice == "4":
             return
         else:
             input("❌ Invalid option. Press Enter to continue...")
@@ -1703,67 +1473,112 @@ def run_batch_scraper():
     print(f"⏱️ Completed in {elapsed:.1f} seconds")
 
 def run_monitor_scraper():
-    """Run the monitor scraper to check for updates"""
+    """User interface for monitoring lists"""
     clear_terminal()
-    print("🔍 Monitor Scraper (Coming Soon)")
-    input("Press Enter to continue...")
-
-def auto_fix_tool():
-    """Comprehensive tool to fix both duplicates and errors across multiple files in one operation"""
-    while True:
-        clear_terminal()
-        print("🔧 Auto Fix Tool - Fix Duplicates and Errors")
-        print("1. Add files to processing queue")
-        print("2. Process queued files")
-        print("3. Return to main menu")
-
-        choice = input("\nChoose an option (1-3) [1]: ").strip() or "1"
-        
-        if choice == "1":
-            file_queue = add_files_to_queue()
-            if file_queue:
-                if input(f"Process {len(file_queue)} queued files now? (Y/n): ").lower() != 'n':
-                    process_file_queue(file_queue)
-                    
-        elif choice == "2":
-            # Let user add files to the queue first
-            file_queue = add_files_to_queue()
-            if file_queue:
-                process_file_queue(file_queue)
-            else:
-                print("❌ No files queued for processing.")
-                input("Press Enter to continue...")
-                
-        elif choice == "3":
-            return
-        else:
-            input("❌ Invalid option. Press Enter to continue...")
-
-def add_files_to_queue():
-    """Add multiple files to the processing queue"""
-    clear_terminal()
-    print("📂 Add Files to Processing Queue")
-    print("Enter one file path per line (empty line to finish):")
+    print("🔍 Monitor Scraper")
     
-    file_queue = []
-    while True:
-        file_path = input("> ").strip()
-        if not file_path:
-            break
-            
-        full_path = get_output_filepath(file_path)
-        if os.path.exists(full_path):
-            file_queue.append(full_path)
-            print(f"✅ Added to queue: {file_path}")
-        else:
-            print(f"❌ File not found: {full_path}")
+    config = load_monitor_config()
     
-    if not file_queue:
-        print("❌ No valid files added to queue.")
+    # Check if any lists are configured
+    if not config["monitored_lists"]:
+        print("❌ No lists are currently being monitored.")
+        print("Please add lists to monitor first.")
+        if input("Would you like to add a list to monitor now? (y/N): ").lower() == 'y':
+            add_monitor_url()
+        else:
+            input("Press Enter to continue...")
+        return
+    
+    print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
+    print("1. Run monitor check now")
+    print("2. Add a URL to monitor")
+    print("3. View and manage monitored lists")
+    print("4. Return to main menu")
+    
+    choice = input("\nChoose an option (1-4): ").strip()
+    
+    if choice == "1":
+        # Run a manual check
+        force_check = input("Force check all lists regardless of status? (y/N): ").lower() == 'y'
+        run_monitor_check(force_check=force_check)
+        input("\nCheck complete. Press Enter to continue...")
+    elif choice == "2":
+        add_monitor_url()
+    elif choice == "3":
+        manage_monitored_lists()
+    elif choice == "4":
+        return
     else:
-        print(f"✅ {len(file_queue)} files added to processing queue.")
+        input("❌ Invalid option. Press Enter to continue...")
+
+def add_monitor_url():
+    """Add a URL to be monitored"""
+    clear_terminal()
+    print("🔗 Add URL to Monitor")
     
-    return file_queue
+    url = input("Enter URL to monitor: ").strip()
+    if not url:
+        input("❌ No URL provided. Press Enter to continue...")
+        return
+    
+    output_file = input("Enter output file for results: ").strip()
+    if not output_file:
+        input("❌ No output file provided. Press Enter to continue...")
+        return
+    
+    # Determine site type from URL
+    site_type = determine_site_type(url)
+    if site_type == "unknown":
+        print("⚠️ This URL type may not be supported. Supported sites: trakt.tv, letterboxd.com, mdblist.com")
+        if input("Continue anyway? (y/N): ").lower() != 'y':
+            return
+    
+    # Add the URL to the monitor configuration
+    config = load_monitor_config()
+    
+    # Generate a unique ID for this monitor entry
+    monitor_id = str(int(time.time() * 1000))
+    
+    # If this is the first URL for this output file, create a new entry
+    if output_file not in config["monitored_lists"]:
+        config["monitored_lists"][output_file] = {
+            "urls": [],
+            "last_check": None,
+            "enabled": True
+        }
+    
+    # Add the URL if it's not already in the list
+    url_exists = False
+    for existing_url in config["monitored_lists"][output_file]["urls"]:
+        if existing_url["url"] == url:
+            url_exists = True
+            break
+    
+    if not url_exists:
+        config["monitored_lists"][output_file]["urls"].append({
+            "id": monitor_id,
+            "url": url,
+            "added": datetime.now().isoformat(),
+            "last_check": None,
+            "title_count": 0,  # Number of titles found in last check
+            "total_added": 0,  # Total titles added from this URL over time
+        })
+    
+    save_monitor_config(config)
+    
+    print(f"✅ Added URL to monitor with ID: {monitor_id}")
+    print(f"🎯 New titles will be saved to: {output_file}")
+    
+    # Ask if user wants to run an initial check
+    if input("Run an initial check now? (Y/n): ").lower() != 'n':
+        run_monitor_check(specific_list=output_file, force_check=True)
+    
+    input("\nPress Enter to continue...")
+
+def manage_monitored_lists():
+    """Placeholder function for list management"""
+    print("Managing lists - this feature will be implemented soon")
+    input("Press Enter to continue...")
 
 def main_menu():
     """Main menu for the application"""
@@ -1787,6 +1602,7 @@ def main_menu():
         elif choice == "2":
             run_batch_scraper()
         elif choice == "3":
+            # Call the run_monitor_scraper function instead of run_monitor_check directly
             run_monitor_scraper()
         elif choice == "4":
             fix_errors_menu()

@@ -2,14 +2,11 @@ version: '3.8'
 
 services:
   parsely:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    build: .
     container_name: parsely
-    stdin_open: true
-    tty: true
-    env_file:
-      - .env
     volumes:
-      - ./output:/app/output
-      - ./parsed_history.json:/app/parsed_history.json
+      - ./data:/app/data
+      - ./.env:/app/.env
+    environment:
+      - OUTPUT_ROOT_DIR=/app/data
+    restart: unless-stopped
