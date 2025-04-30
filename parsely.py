@@ -73,6 +73,430 @@ SCAN_HISTORY_FILE = "scan_history.json"
 MONITOR_CONFIG_FILE = "monitor_config.json"
 DEFAULT_MONITOR_INTERVAL = 1440  # 24 hours by default
 
+def batch_url_scraping():
+    """
+    Process multiple URLs at once, adding them to specified output files.
+    """
+    clear_terminal()
+    print("🌐 Batch URL Scraping")
+    
+    urls_input = input("\nEnter URLs (one per line, empty line to finish):\n")
+    print("🌐 Batch URL Scraping")
+    
+    urls_input = input("\nEnter URLs (one per line, empty line to finish):\n")
+    urls = [u.strip() for u in urls_input.split("\n") if u.strip()]
+    
+    if not urls:
+        print("❌ No URLs provided")
+        input("\nPress Enter to continue...")
+        return
+    
+    print(f"\nProcessing {len(urls)} URLs")
+    
+    # Ask for output file
+    output_file = input("\nEnter output filename (default: batch_results.txt): ").strip()
+    if not output_file:
+        output_file = "batch_results.txt"
+    
+    # Add .txt extension if missing
+    if not output_file.endswith('.txt'):
+        output_file += '.txt'
+    
+    # Ask for TMDB and year options
+    enable_tmdb = input("Enable TMDB lookup? (Y/n): ").lower() != 'n'
+    include_year = input("Include year in titles? (Y/n): ").lower() != 'n'
+    
+    print("\n⏳ Starting batch processing...")
+    
+    # Track overall progress
+    total_titles = 0
+    total_new = 0
+    total_skipped = 0
+    total_cached = 0
+    scan_history = load_scan_history()
+    
+    # Process URLs one by one
+    for i, url in enumerate(urls, 1):
+        print(f"\n🌐 Processing URL {i}/{len(urls)}: {url}")
+        try:
+            titles = scrape_all_pages(url)
+            if titles:
+                print(f"📝 Found {len(titles)} titles from {url}")
+                new_count, skipped_count, cached_count = process_scrape_results(
+                    titles, output_file, scan_history,
+                    enable_tmdb=enable_tmdb, include_year=include_year
+                )
+                total_titles += len(titles)
+                total_new += new_count
+                total_skipped += skipped_count
+                total_cached += cached_count
+            else:
+                print(f"⚠️ No titles found from {url}")
+        except Exception as e:
+            print(f"❌ Error processing {url}: {e}")
+    
+    print(f"\n✅ Batch processing complete!")
+    print(f"📊 Summary: {total_titles} total titles, {total_new} new added, {total_skipped} skipped, {total_cached} from cache")
+    input("\nPress Enter to continue...")
+
+def batch_fix_errors_and_duplicates():
+    """
+    Find and fix errors and duplicates across all lists in the output directory.
+    """
+    clear_terminal()
+    print("🔧 Batch Fix Errors & Duplicates")
+    
+    root_dir = get_env_string("OUTPUT_ROOT_DIR", os.getcwd())
+    print(f"\nScanning directory: {root_dir}")
+    
+    # Find all .txt files
+    txt_files = []
+    for root, _, files in os.walk(root_dir):
+        for file in files:
+            if file.endswith('.txt'):
+                full_path = os.path.join(root, file)
+                rel_path = os.path.relpath(full_path, root_dir)
+                txt_files.append(rel_path)
+    
+    if not txt_files:
+        print("❌ No .txt files found")
+        input("\nPress Enter to continue...")
+        return
+    
+    print(f"\nFound {len(txt_files)} .txt files")
+    print("\nAnalyzing files for errors and duplicates...")
+    
+    # Track summary
+    total_errors = 0
+    total_duplicates = 0
+    fixed_errors = 0
+    fixed_duplicates = 0
+    
+    # Process each file
+    for i, file in enumerate(txt_files, 1):
+        print(f"\nProcessing ({i}/{len(txt_files)}): {file}")
+        full_path = get_output_filepath(file)
+        
+        # Check for errors
+        errors = find_error_entries(full_path)
+        error_count = len(errors)
+        total_errors += error_count
+        
+        if error_count > 0:
+            print(f"⚠️ Found {error_count} errors in {file}")
+            
+            # Auto-fix errors
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            fixed = process_auto_fix_errors(errors, lines, full_path)
+            fixed_errors += fixed
+            print(f"✅ Fixed {fixed} of {error_count} errors")
+        
+        # Check for duplicates
+        duplicates = find_duplicate_entries_ultrafast(full_path)
+        duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values()) if duplicates else 0
+        total_duplicates += duplicate_count
+        
+        if duplicate_count > 0:
+            print(f"⚠️ Found {duplicate_count} duplicate entries in {file}")
+            
+            # Fix duplicates
+            lines_to_keep = set()
+            
+            for title, occurrences in duplicates.items():
+                # Keep only the best line for each duplicate title
+                best_line = 0
+                # Add logic to select best line here if needed
+                if occurrences:
+                    best_line = occurrences[0]["line_num"]
+                lines_to_keep.add(best_line)
+            
+            # Also keep lines that aren't duplicates
+            with open(full_path, "r", encoding="utf-8") as f:
+                for i, line in enumerate(f, 1):
+                    is_duplicate = False
+                    for title, occurrences in duplicates.items():
+                        if i in [occ["line_num"] for occ in occurrences[1:]]:  # Skip first occurrence
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        lines_to_keep.add(i)
+            
+            # Remove duplicate lines
+            remove_duplicate_lines(full_path, lines_to_keep)
+            fixed_duplicates += duplicate_count
+            print(f"✅ Removed {duplicate_count} duplicate entries")
+    
+    print(f"\n✅ Batch fix complete!")
+    print(f"📊 Summary: Found {total_errors} errors and {total_duplicates} duplicates")
+    print(f"📊 Fixed {fixed_errors} errors and {fixed_duplicates} duplicates")
+    input("\nPress Enter to continue...")
+
+def manage_monitored_lists():
+    """
+    Manage monitored lists - view, enable/disable, delete lists, or modify URLs.
+    """
+    while True:
+        clear_terminal()
+        print("📋 Manage Monitored Lists")
+        
+        # Load the current monitor configuration
+        config = load_monitor_config()
+        monitored_lists = config.get("monitored_lists", {})
+        
+        if not monitored_lists:
+            print("❌ No lists are currently being monitored.")
+            print("\nOptions:")
+            print("1. Add a new list to monitor")
+            print("2. Return to monitor menu")
+            
+            choice = input("\nChoose an option (1-2): ").strip()
+            if choice == "1":
+                add_monitor_url()
+            elif choice == "2":
+                return
+            else:
+                print("❌ Invalid choice")
+                time.sleep(1)
+            continue
+        
+        # Display lists with their status and stats
+        print("\nCurrent Monitored Lists:")
+        print("-" * 60)
+        print(f"{'#':<3} {'List Name':<30} {'Status':<10} {'URLs':<6} {'Last Check':<20}")
+        print("-" * 60)
+        
+        list_options = list(monitored_lists.keys())
+        for i, list_name in enumerate(list_options, 1):
+            list_config = monitored_lists[list_name]
+            status = "✅ Active" if list_config.get("enabled", True) else "❌ Disabled"
+            url_count = len(list_config.get("urls", []))
+            
+            # Format last check time
+            last_check = list_config.get("last_check")
+            if last_check:
+                last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %H:%M")
+            else:
+                last_check_time = "Never"
+                
+            print(f"{i:<3} {list_name:<30} {status:<10} {url_count:<6} {last_check_time:<20}")
+        
+        print("\nOptions:")
+        print("1. View/Edit list details")
+        print("2. Enable/Disable a list")
+        print("3. Delete a list")
+        print("4. Add a new list")
+        print("5. Return to monitor menu")
+        
+        choice = input("\nChoose an option (1-5): ").strip()
+        
+        if choice == "1":
+            # View/Edit list details
+            list_index = input("\nEnter list number to view/edit (or 'back'): ").strip()
+            if list_index.lower() == 'back':
+                continue
+                
+            try:
+                list_index = int(list_index)
+                if 1 <= list_index <= len(list_options):
+                    selected_list = list_options[list_index - 1]
+                    edit_list_details(selected_list, config)
+                else:
+                    print("❌ Invalid list number")
+                    time.sleep(1)
+            except ValueError:
+                print("❌ Please enter a number")
+                time.sleep(1)
+                
+        elif choice == "2":
+            # Enable/Disable a list
+            list_index = input("\nEnter list number to toggle enabled status (or 'back'): ").strip()
+            if list_index.lower() == 'back':
+                continue
+                
+            try:
+                list_index = int(list_index)
+                if 1 <= list_index <= len(list_options):
+                    selected_list = list_options[list_index - 1]
+                    list_config = monitored_lists[selected_list]
+                    current_status = list_config.get("enabled", True)
+                    
+                    # Toggle status
+                    list_config["enabled"] = not current_status
+                    new_status = "enabled" if list_config["enabled"] else "disabled"
+                    
+                    # Save config
+                    save_monitor_config(config)
+                    print(f"✅ List '{selected_list}' is now {new_status}")
+                    time.sleep(1)
+                else:
+                    print("❌ Invalid list number")
+                    time.sleep(1)
+            except ValueError:
+                print("❌ Please enter a number")
+                time.sleep(1)
+                
+        elif choice == "3":
+            # Delete a list
+            list_index = input("\nEnter list number to delete (or 'back'): ").strip()
+            if list_index.lower() == 'back':
+                continue
+                
+            try:
+                list_index = int(list_index)
+                if 1 <= list_index <= len(list_options):
+                    selected_list = list_options[list_index - 1]
+                    
+                    # Confirm deletion
+                    confirm = input(f"❗ Are you sure you want to delete '{selected_list}'? (y/N): ").lower()
+                    if confirm == 'y':
+                        # Delete the list from config
+                        del monitored_lists[selected_list]
+                        save_monitor_config(config)
+                        print(f"✅ List '{selected_list}' has been deleted from monitoring")
+                        time.sleep(1)
+                else:
+                    print("❌ Invalid list number")
+                    time.sleep(1)
+            except ValueError:
+                print("❌ Please enter a number")
+                time.sleep(1)
+                
+        elif choice == "4":
+            # Add a new list
+            add_monitor_url()
+            
+        elif choice == "5":
+            # Return to monitor menu
+            return
+            
+        else:
+            print("❌ Invalid choice")
+            time.sleep(1)
+
+def edit_list_details(list_name, config):
+    """
+    View and edit details of a specific monitored list
+    """
+    while True:
+        clear_terminal()
+        list_config = config["monitored_lists"][list_name]
+        urls = list_config.get("urls", [])
+        
+        print(f"📝 List Details: {list_name}")
+        print(f"Status: {'✅ Active' if list_config.get('enabled', True) else '❌ Disabled'}")
+        
+        # Format last check time
+        last_check = list_config.get("last_check")
+        if last_check:
+            last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %H:%M")
+        else:
+            last_check_time = "Never"
+            
+        print(f"Last Check: {last_check_time}")
+        
+        # Display URLs
+        print("\nMonitored URLs:")
+        print("-" * 80)
+        if not urls:
+            print("No URLs configured for this list")
+        else:
+            for i, url_entry in enumerate(urls, 1):
+                url = url_entry["url"]
+                title_count = url_entry.get("title_count", 0)
+                total_added = url_entry.get("total_added", 0)
+                print(f"{i}. {url} ({title_count} titles, {total_added} added)")
+        print("-" * 80)
+        
+        print("\nOptions:")
+        print("1. Add URL")
+        print("2. Remove URL")
+        print("3. Run Check on this list")
+        print("4. Return to list management")
+        
+        choice = input("\nChoose an option (1-4): ").strip()
+        
+        if choice == "1":
+            # Add URL
+            url = input("Enter URL to monitor (or 'back'): ").strip()
+            if url.lower() == 'back':
+                continue
+                
+            # Validate URL
+            if not url.startswith(('http://', 'https://')):
+                print("❌ Invalid URL format. Please include http:// or https://")
+                input("Press Enter to continue...")
+                continue
+                
+            # Check if URL already exists in this list
+            url_exists = False
+            for url_entry in urls:
+                if url_entry["url"] == url:
+                    url_exists = True
+                    break
+                    
+            if url_exists:
+                print(f"⚠️ URL already exists in this list")
+            else:
+                # Add the new URL
+                if "urls" not in list_config:
+                    list_config["urls"] = []
+                    
+                list_config["urls"].append({
+                    "url": url,
+                    "last_check": None,
+                    "title_count": 0,
+                    "total_added": 0
+                })
+                
+                # Save the updated config
+                save_monitor_config(config)
+                print(f"✅ Added URL to list '{list_name}'")
+                
+            input("Press Enter to continue...")
+            
+        elif choice == "2":
+            # Remove URL
+            if not urls:
+                print("❌ No URLs to remove")
+                input("Press Enter to continue...")
+                continue
+                
+            url_index = input("Enter URL number to remove (or 'back'): ").strip()
+            if url_index.lower() == 'back':
+                continue
+                
+            try:
+                url_index = int(url_index)
+                if 1 <= url_index <= len(urls):
+                    removed_url = urls[url_index - 1]["url"]
+                    del urls[url_index - 1]
+                    save_monitor_config(config)
+                    print(f"✅ Removed URL: {removed_url}")
+                else:
+                    print("❌ Invalid URL number")
+            except ValueError:
+                print("❌ Please enter a number")
+                
+            input("Press Enter to continue...")
+            
+        elif choice == "3":
+            # Run Check on this list
+            if input("Do you want to force check this list? (y/N): ").lower() == 'y':
+                run_monitor_check(force_check=True, specific_list=list_name)
+            else:
+                run_monitor_check(force_check=False, specific_list=list_name)
+            input("Press Enter to continue...")
+            
+        elif choice == "4":
+            # Return to list management
+            return
+            
+        else:
+            print("❌ Invalid choice")
+            time.sleep(1)
+
 def load_monitor_config():
     """Load the monitor configuration from file"""
     if os.path.exists(MONITOR_CONFIG_FILE):
@@ -89,6 +513,108 @@ def load_monitor_config():
         "enabled": True,
         "monitored_lists": {}
     }
+
+def add_monitor_url():
+    """
+    Add a URL to monitor to an existing or new list.
+    Allows user to input URL and select which list to add it to.
+    """
+    clear_terminal()
+    print("➕ Add a URL to Monitor")
+    
+    # Load the current monitor configuration
+    config = load_monitor_config()
+    
+    # Ask for URL to monitor
+    url = input("Enter URL to monitor (or 'back' to return): ").strip()
+    if url.lower() == 'back':
+        return
+    
+    # Validate URL
+    if not url.startswith(('http://', 'https://')):
+        print("❌ Invalid URL format. Please include http:// or https://")
+        input("Press Enter to continue...")
+        return
+    
+    # Get which list to add it to
+    print("\nSelect a list to add this URL to:")
+    print("1. Add to a new list")
+    
+    # Display existing lists
+    list_options = list(config.get("monitored_lists", {}).keys())
+    for i, list_name in enumerate(list_options, 2):
+        print(f"{i}. {list_name}")
+    
+    print(f"{len(list_options) + 2}. Cancel")
+    
+    try:
+        choice = int(input("\nEnter your choice: "))
+        
+        if choice == 1:
+            # Add to a new list
+            list_name = input("Enter new list filename: ").strip()
+            if not list_name:
+                print("❌ List name cannot be empty")
+                input("Press Enter to continue...")
+                return
+                
+            # Add .txt extension if not provided
+            if not list_name.endswith('.txt'):
+                list_name += '.txt'
+                
+            # Initialize new list in config
+            if list_name not in config.get("monitored_lists", {}):
+                if "monitored_lists" not in config:
+                    config["monitored_lists"] = {}
+                config["monitored_lists"][list_name] = {
+                    "enabled": True,
+                    "last_check": None,
+                    "urls": []
+                }
+        elif choice == len(list_options) + 2:
+            # Cancel
+            return
+        elif 2 <= choice <= len(list_options) + 1:
+            # Add to an existing list
+            list_name = list_options[choice - 2]
+        else:
+            print("❌ Invalid choice")
+            input("Press Enter to continue...")
+            return
+            
+        # Check if URL already exists in this list
+        url_exists = False
+        for url_entry in config["monitored_lists"][list_name].get("urls", []):
+            if url_entry["url"] == url:
+                url_exists = True
+                break
+                
+        if url_exists:
+            print(f"⚠️ URL already exists in list '{list_name}'")
+        else:
+            # Add the new URL
+            if "urls" not in config["monitored_lists"][list_name]:
+                config["monitored_lists"][list_name]["urls"] = []
+                
+            config["monitored_lists"][list_name]["urls"].append({
+                "url": url,
+                "last_check": None,
+                "title_count": 0,
+                "total_added": 0
+            })
+            
+            # Save the updated config
+            save_monitor_config(config)
+            print(f"✅ Added URL to list '{list_name}'")
+            
+            # Ask if user wants to check it now
+            if input("Do you want to check this URL now? (y/N): ").lower() == 'y':
+                run_monitor_check(force_check=True, specific_list=list_name)
+    
+    except ValueError:
+        print("❌ Please enter a number")
+    
+    input("Press Enter to continue...")
 
 def run_monitor_check(force_check=False, specific_list=None):
     """
@@ -2107,6 +2633,252 @@ def run_batch_scraper():
     
     input("\nBatch processing complete. Press Enter to continue...")
 
+def auto_fix_tool():
+    """Tool for automatically fixing errors and duplicates in list files"""
+    while True:
+        clear_terminal()
+        print("🔧 Auto Fix Tool")
+        print("1. Fix errors and duplicates in a single file")
+        print("2. Fix errors and duplicates in all monitored list files")
+        print("3. Return to main menu")
+
+        choice = input("\nChoose an option (1-3): ").strip()
+
+        if choice == "1":
+            # Handle single file
+            filepath = input("Enter file path to fix: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
+                
+            # Check for errors
+            print(f"🔍 Scanning for errors in {filepath}...")
+            errors = find_error_entries(full_path)
+            
+            # Check for duplicates
+            print(f"🔍 Scanning for duplicates in {filepath}...")
+            duplicates = find_duplicate_entries_ultrafast(full_path)
+            
+            # Report findings
+            if not errors and not duplicates:
+                print("✅ No issues found in this file!")
+                input("Press Enter to continue...")
+                continue
+                
+            error_count = len(errors) if errors else 0
+            duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values()) if duplicates else 0
+            
+            print(f"\n📊 Issues Found:")
+            if error_count > 0:
+                print(f"⚠️ {error_count} error entries")
+            if duplicate_count > 0:
+                print(f"⚠️ {duplicate_count} duplicate entries across {len(duplicates)} titles")
+            
+            # Confirm auto-fix
+            if input("\nProceed with automatic fixing? (y/N): ").lower() != 'y':
+                continue
+            
+            # Fix errors first
+            if errors:
+                print(f"\n🔧 Fixing {error_count} errors...")
+                with open(full_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                print(f"✅ Fixed {total_fixed} of {error_count} errors")
+            
+            # Then fix duplicates
+            if duplicates:
+                print(f"\n🔧 Fixing {duplicate_count} duplicates...")
+                lines_to_keep = set()
+                
+                # For each set of duplicates, select the best line to keep
+                for title, occurrences in duplicates.items():
+                    best_line = select_best_duplicate_line(occurrences)
+                    lines_to_keep.add(best_line["line_num"])
+                
+                # Also keep non-duplicate lines
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        is_duplicate = False
+                        for title, occurrences in duplicates.items():
+                            if i in [occ["line_num"] for occ in occurrences]:
+                                is_duplicate = True
+                                break
+                        if not is_duplicate:
+                            lines_to_keep.add(i)
+                
+                # Remove duplicates
+                if remove_duplicate_lines(full_path, lines_to_keep):
+                    print(f"✅ Removed {duplicate_count} duplicate entries")
+            
+            # Update monitored lists config if applicable
+            config = load_monitor_config()
+            if filepath in config["monitored_lists"]:
+                if errors:
+                    config["monitored_lists"][filepath]["error_count"] = 0
+                if duplicates:
+                    config["monitored_lists"][filepath]["duplicate_count"] = 0
+                save_monitor_config(config)
+                
+            input("\nAuto-fix complete. Press Enter to continue...")
+            
+        elif choice == "2":
+            # Handle all monitored lists
+            config = load_monitor_config()
+            if not config["monitored_lists"]:
+                print("❌ No lists are currently being monitored.")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
+            if input("Run auto-fix on all monitored lists? (y/N): ").lower() != 'y':
+                continue
+            
+            # Process each monitored list
+            fixed_errors = 0
+            fixed_duplicates = 0
+            
+            for output_file in config["monitored_lists"]:
+                full_path = get_output_filepath(output_file)
+                print(f"\n📝 Processing {output_file}...")
+                
+                if not os.path.exists(full_path):
+                    print(f"❌ File not found: {full_path}")
+                    continue
+                
+                # Fix errors
+                errors = find_error_entries(full_path)
+                if errors:
+                    print(f"⚠️ Found {len(errors)} error entries")
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                    fixed_errors += total_fixed
+                    config["monitored_lists"][output_file]["error_count"] = len(errors) - total_fixed
+                
+                # Fix duplicates
+                duplicates = find_duplicate_entries_ultrafast(full_path)
+                if duplicates:
+                    duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values())
+                    print(f"⚠️ Found {duplicate_count} duplicate entries")
+                    
+                    lines_to_keep = set()
+                    for title, occurrences in duplicates.items():
+                        best_line = select_best_duplicate_line(occurrences)
+                        lines_to_keep.add(best_line["line_num"])
+                    
+                    # Keep non-duplicate lines
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        for i, line in enumerate(f, 1):
+                            is_duplicate = False
+                            for title, occurrences in duplicates.items():
+                                if i in [occ["line_num"] for occ in occurrences]:
+                                    is_duplicate = True
+                                    break
+                            if not is_duplicate:
+                                lines_to_keep.add(i)
+                    
+                    if remove_duplicate_lines(full_path, lines_to_keep):
+                        print(f"✅ Removed {duplicate_count} duplicate entries")
+                        fixed_duplicates += duplicate_count
+                        config["monitored_lists"][output_file]["duplicate_count"] = 0
+            
+            # Save the updated config
+            save_monitor_config(config)
+            
+            print(f"\n✅ Auto-fix complete: Fixed {fixed_errors} errors and removed {fixed_duplicates} duplicates")
+            input("Press Enter to continue...")
+            
+        elif choice == "3":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
+
+def duplicates_menu():
+    """Menu for managing duplicate entries in list files"""
+    while True:
+        clear_terminal()
+        print("🔍 Duplicates Management Menu")
+        print("1. Find duplicates in a single file")
+        print("2. Find duplicates in all monitored list files")
+        print("3. Return to main menu")
+
+        choice = input("\nChoose an option (1-3): ").strip()
+
+        if choice == "1":
+            filepath = input("Enter file path to check: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"🔍 Scanning for duplicates in {filepath}...")
+            duplicates = find_duplicate_entries_ultrafast(full_path)
+            
+            if not duplicates:
+                print("✅ No duplicates found!")
+                input("Press Enter to continue...")
+                continue
+                
+            duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values())
+            print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+            
+            if input("Would you like to remove these duplicates? (y/N): ").lower() == 'y':
+                lines_to_keep = set()
+                
+                # For each set of duplicates, select the best line to keep
+                for title, occurrences in duplicates.items():
+                    best_line = select_best_duplicate_line(occurrences)
+                    lines_to_keep.add(best_line["line_num"])
+                
+                # Also keep non-duplicate lines
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        is_duplicate = False
+                        for title, occurrences in duplicates.items():
+                            if i in [occ["line_num"] for occ in occurrences]:
+                                is_duplicate = True
+                                break
+                        if not is_duplicate:
+                            lines_to_keep.add(i)
+                
+                # Remove duplicates
+                if remove_duplicate_lines(full_path, lines_to_keep):
+                    print(f"✅ Removed {duplicate_count} duplicate entries")
+                    
+                    # Update the monitor config if this is a monitored list
+                    config = load_monitor_config()
+                    if filepath in config["monitored_lists"]:
+                        config["monitored_lists"][filepath]["duplicate_count"] = 0
+                        save_monitor_config(config)
+            
+            input("Press Enter to continue...")
+            
+        elif choice == "2":
+            # Fix duplicates in all monitored lists
+            config = load_monitor_config()
+            if not config["monitored_lists"]:
+                print("❌ No lists are currently being monitored.")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
+            if input("Run duplicate check on all monitored lists? (y/N): ").lower() != 'y':
+                continue
+                
+            run_bulk_duplicate_check(config["monitored_lists"])
+            input("Press Enter to continue...")
+            
+        elif choice == "3":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
+
 def main_menu():
     """Main menu for the application"""
     while True:
@@ -2117,10 +2889,9 @@ def main_menu():
         print("3. Monitor Scraper")
         print("4. Fix Errors in Lists")
         print("5. Manage Duplicates in Lists")
-        print("6. Batch Process Folders")
-        print("7. Auto Fix Tool")
-        print("8. Settings")
-        print("9. Exit")
+        print("6. Auto Fix Tool")
+        print("7. Settings")
+        print("8. Exit")
 
         choice = input("\nChoose an option (1-9): ").strip()
 
@@ -2135,12 +2906,10 @@ def main_menu():
         elif choice == "5":
             duplicates_menu()  # This function also needs to be implemented
         elif choice == "6":
-            batch_process_menu()  # This function also needs to be implemented
-        elif choice == "7":
             auto_fix_tool()  # This function also needs to be implemented
-        elif choice == "8":
+        elif choice == "7":
             show_settings()  # This function also needs to be implemented
-        elif choice == "9":
+        elif choice == "8":
             print("👋 Exiting.")
             break
         else:
