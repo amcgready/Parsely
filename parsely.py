@@ -1823,45 +1823,314 @@ def format_minutes(minutes):
         hours = (minutes % 1440) / 60
         return f"{int(days)}d {int(hours)}h"
 
-def main_menu():
-    """Main menu for the application"""
-    while True:
-        clear_terminal()
-        print("📋 Parsely - Media List Manager")
-        print("1. Run Scraper (Single URL)")
-        print("2. Batch Scraper (Multiple URLs)")
-        print("3. Monitor Scraper")
-        print("4. Fix Errors in Lists")
-        print("5. Manage Duplicates in Lists")
-        print("6. Batch Process Folders")
-        print("7. Auto Fix Tool")
-        print("8. Settings")
-        print("9. Exit")
+def check_monitor_progress():
+    """Display comprehensive monitoring progress/status for all lists"""
+    clear_terminal()
+    print("📊 Monitor Progress Status")
+    
+    config = load_monitor_config()
+    if not config["monitored_lists"]:
+        print("❌ No lists are currently being monitored.")
+        input("Press Enter to return to the previous menu...")
+        return
+    
+    # Get the monitor interval for time remaining calculation
+    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+    current_time = datetime.now().timestamp()
+    
+    # Load error check history and duplicate check history if available
+    error_check_history = load_maintenance_history("error_checks")
+    duplicate_check_history = load_maintenance_history("duplicate_checks")
+    
+    print("\n{:<60} {:<15} {:<15} {:<15} {:<15}".format(
+        "List Path", "Status", "Last Scan", "Last Error Check", "Last Dupe Check"))
+    print("─" * 120)
+    
+    for output_file in config["monitored_lists"]:
+        list_config = config["monitored_lists"][output_file]
+        
+        # Get list status (enabled/disabled)
+        status = "✅ Enabled" if list_config.get("enabled", True) else "❌ Disabled"
+        
+        # Calculate last scan time and next scheduled scan
+        last_scan_str = "Never"
+        time_remaining_str = "N/A"
+        
+        last_check = list_config.get("last_check")
+        if last_check:
+            last_check_time = float(last_check)
+            last_scan_str = format_timestamp(last_check_time)
+            
+            # Calculate time remaining until next check
+            time_since_check = (current_time - last_check_time) / 60  # Minutes
+            if time_since_check < interval_minutes:
+                time_remaining = interval_minutes - time_since_check
+                time_remaining_str = format_minutes(time_remaining)
+            else:
+                time_remaining_str = "Overdue"
+        
+        # Get last error check time
+        last_error_check_str = "Never"
+        if error_check_history and output_file in error_check_history:
+            last_error_check = error_check_history[output_file].get("last_check")
+            if last_error_check:
+                last_error_check_str = format_timestamp(last_error_check)
+        
+        # Get last duplicate check time
+        last_duplicate_check_str = "Never"
+        if duplicate_check_history and output_file in duplicate_check_history:
+            last_duplicate_check = duplicate_check_history[output_file].get("last_check")
+            if last_duplicate_check:
+                last_duplicate_check_str = format_timestamp(last_duplicate_check)
+        
+        # Format the output path to fit nicely in console
+        display_path = output_file
+        if len(display_path) > 57:
+            # Truncate the path but keep the filename
+            parts = output_file.split('/')
+            if len(parts) > 2:
+                display_path = "/.../" + "/".join(parts[-2:])
+            else:
+                display_path = "..." + display_path[-54:]
+        
+        print("{:<60} {:<15} {:<15} {:<15} {:<15}".format(
+            display_path, status, last_scan_str, last_error_check_str, last_duplicate_check_str))
+        
+        # Print additional data about next scheduled scan and error/duplicate counts
+        error_count = list_config.get("error_count", 0)
+        duplicate_count = list_config.get("duplicate_count", 0)
+        
+        error_str = f"Errors: {error_count}" if error_count > 0 else "No errors"
+        duplicate_str = f"Dupes: {duplicate_count}" if duplicate_count > 0 else "No dupes"
+        
+        print("    URLs: {} | Next scan: {} | {} | {}".format(
+            len(list_config["urls"]),
+            time_remaining_str,
+            error_str,
+            duplicate_str
+        ))
+        
+        # Add a separator between lists
+        print("─" * 120)
+    
+    # Add option for maintenance
+    print("\nMaintenance Options:")
+    print("1. Run error check on all lists")
+    print("2. Run duplicate check on all lists")
+    print("3. Return to monitor menu")
+    
+    choice = input("\nChoose an option (1-3): ").strip()
+    
+    if choice == "1":
+        if input("Run error check on all monitored lists? (y/N): ").lower() == 'y':
+            run_bulk_error_check(config["monitored_lists"])
+    elif choice == "2":
+        if input("Run duplicate check on all monitored lists? (y/N): ").lower() == 'y':
+            run_bulk_duplicate_check(config["monitored_lists"])
+    
+    input("\nPress Enter to continue...")
 
-        choice = input("\nChoose an option (1-9): ").strip()
+def format_timestamp(timestamp):
+    """Format a timestamp into a readable date string"""
+    dt = datetime.fromtimestamp(float(timestamp))
+    return dt.strftime("%Y-%m-%d %H:%M")
 
-        if choice == "1":
-            run_scraper()
-        elif choice == "2":
-            run_batch_scraper()
-        elif choice == "3":
-            # Call the run_monitor_scraper function instead of run_monitor_check directly
-            run_monitor_scraper()
-        elif choice == "4":
-            fix_errors_menu()
-        elif choice == "5":
-            duplicates_menu()
-        elif choice == "6":
-            batch_process_menu()
-        elif choice == "7":
-            auto_fix_tool()
-        elif choice == "8":
-            show_settings()
-        elif choice == "9":
-            print("👋 Exiting.")
-            break
+def load_maintenance_history(history_type):
+    """
+    Load maintenance history (error checks or duplicate checks)
+    
+    Args:
+        history_type (str): Type of history to load ("error_checks" or "duplicate_checks")
+    """
+    filename = f"{history_type}_history.json"
+    if os.path.exists(filename):
+        try:
+            with open(filename, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except json.JSONDecodeError:
+            print(f"⚠️ Warning: {filename} contains invalid JSON. Creating new history.")
+    
+    return {}
+
+def save_maintenance_history(history_type, history):
+    """
+    Save maintenance history (error checks or duplicate checks)
+    
+    Args:
+        history_type (str): Type of history to save ("error_checks" or "duplicate_checks")
+        history (dict): History data to save
+    """
+    filename = f"{history_type}_history.json"
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(history, f, indent=2, ensure_ascii=False)
+
+def run_bulk_error_check(monitored_lists):
+    """Run error check on all monitored lists and update history"""
+    history = load_maintenance_history("error_checks")
+    current_time = datetime.now().timestamp()
+    
+    for output_file in monitored_lists:
+        full_path = get_output_filepath(output_file)
+        if not os.path.exists(full_path):
+            print(f"❌ File not found: {full_path}")
+            continue
+            
+        print(f"\n🔍 Checking for errors in: {output_file}")
+        errors = find_error_entries(full_path)
+        
+        if not errors:
+            print("✅ No errors found!")
+            
+            # Update the history to show we checked
+            if output_file not in history:
+                history[output_file] = {"checks": 0, "fixes": 0}
+                
+            history[output_file]["checks"] = history[output_file].get("checks", 0) + 1
+            history[output_file]["last_check"] = current_time
+            history[output_file]["remaining_errors"] = 0
+            
+            # Update the monitor config with zero errors
+            config = load_monitor_config()
+            if output_file in config["monitored_lists"]:
+                config["monitored_lists"][output_file]["error_count"] = 0
+                save_monitor_config(config)
+                
         else:
-            input("❌ Invalid option. Press Enter to continue...")
+            print(f"⚠️ Found {len(errors)} error entries")
+            
+            # Update the monitor config with error count
+            config = load_monitor_config()
+            if output_file in config["monitored_lists"]:
+                config["monitored_lists"][output_file]["error_count"] = len(errors)
+                save_monitor_config(config)
+            
+            # Ask if user wants to fix them
+            if input(f"Fix {len(errors)} errors in {output_file}? (y/N): ").lower() == 'y':
+                # Read file content
+                with open(full_path, "r", encoding="utf-8") as f:
+                    lines = f.readlines()
+                
+                # Process errors with caching
+                total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                
+                # Update stats
+                if output_file not in history:
+                    history[output_file] = {"checks": 0, "fixes": 0}
+                
+                history[output_file]["checks"] = history[output_file].get("checks", 0) + 1
+                history[output_file]["fixes"] = history[output_file].get("fixes", 0) + total_fixed
+                history[output_file]["last_check"] = current_time
+                history[output_file]["remaining_errors"] = len(errors) - total_fixed
+                
+                # Update the monitor config with remaining error count
+                if output_file in config["monitored_lists"]:
+                    config["monitored_lists"][output_file]["error_count"] = len(errors) - total_fixed
+                    save_monitor_config(config)
+            else:
+                # Update just the check timestamp
+                if output_file not in history:
+                    history[output_file] = {"checks": 0, "fixes": 0}
+                
+                history[output_file]["checks"] = history[output_file].get("checks", 0) + 1
+                history[output_file]["last_check"] = current_time
+                history[output_file]["remaining_errors"] = len(errors)
+    
+    # Save updated history
+    save_maintenance_history("error_checks", history)
+    print("\n✅ Error check complete for all monitored lists")
+
+def run_bulk_duplicate_check(monitored_lists):
+    """Run duplicate check on all monitored lists and update history"""
+    history = load_maintenance_history("duplicate_checks")
+    current_time = datetime.now().timestamp()
+    
+    for output_file in monitored_lists:
+        full_path = get_output_filepath(output_file)
+        if not os.path.exists(full_path):
+            print(f"❌ File not found: {full_path}")
+            continue
+            
+        print(f"\n🔍 Checking for duplicates in: {output_file}")
+        duplicates = find_duplicate_entries_ultrafast(full_path)
+        
+        if not duplicates:
+            print("✅ No duplicates found!")
+            
+            # Update the history to show we checked
+            if output_file not in history:
+                history[output_file] = {"checks": 0, "removals": 0}
+                
+            history[output_file]["checks"] = history[output_file].get("checks", 0) + 1
+            history[output_file]["last_check"] = current_time
+            
+            # Update the monitor config with zero duplicates
+            config = load_monitor_config()
+            if output_file in config["monitored_lists"]:
+                config["monitored_lists"][output_file]["duplicate_count"] = 0
+                save_monitor_config(config)
+                
+        else:
+            duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values())
+            print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+            
+            # Update the monitor config with duplicate count
+            config = load_monitor_config()
+            if output_file in config["monitored_lists"]:
+                config["monitored_lists"][output_file]["duplicate_count"] = duplicate_count
+                save_monitor_config(config)
+            
+            # Ask if user wants to remove them
+            if input(f"Remove duplicates from {output_file}? (y/N): ").lower() == 'y':
+                # Process each set of duplicates
+                lines_to_keep = set()
+                total_removed = 0
+                
+                for title, occurrences in duplicates.items():
+                    # For each duplicate set, keep the first/best entry
+                    best_line = select_best_duplicate_line(occurrences)
+                    lines_to_keep.add(best_line["line_num"])
+                    total_removed += len(occurrences) - 1
+                
+                # Also keep lines that aren't duplicates
+                with open(full_path, "r", encoding="utf-8") as f:
+                    for i, line in enumerate(f, 1):
+                        # If this line isn't part of any duplicate set, keep it
+                        is_duplicate = False
+                        for title, occurrences in duplicates.items():
+                            if i in [occ["line_num"] for occ in occurrences]:
+                                is_duplicate = True
+                                break
+                        
+                        if not is_duplicate:
+                            lines_to_keep.add(i)
+                
+                # Remove duplicates
+                remove_duplicate_lines(full_path, lines_to_keep)
+                print(f"✅ Removed {total_removed} duplicate entries")
+                
+                # Update stats
+                if output_file not in history:
+                    history[output_file] = {"checks": 0, "removals": 0}
+                
+                history[output_file]["checks"] = history[output_file].get("checks", 0) + 1
+                history[output_file]["removals"] = history[output_file].get("removals", 0) + total_removed
+                history[output_file]["last_check"] = current_time
+                
+                # Update the monitor config with zero duplicates (since we removed them)
+                if output_file in config["monitored_lists"]:
+                    config["monitored_lists"][output_file]["duplicate_count"] = 0
+                    save_monitor_config(config)
+            else:
+                # Update just the check timestamp
+                if output_file not in history:
+                    history[output_file] = {"checks": 0, "removals": 0}
+                
+                history[output_file]["checks"] = history[output_file].get("checks", 0) + 1
+                history[output_file]["last_check"] = current_time
+    
+    # Save updated history
+    save_maintenance_history("duplicate_checks", history)
+    print("\n✅ Duplicate check complete for all monitored lists")
 
 # This is the main entry point for the program
 if __name__ == "__main__":
