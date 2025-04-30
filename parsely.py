@@ -90,6 +90,185 @@ def load_monitor_config():
         "monitored_lists": {}
     }
 
+def run_monitor_check(force_check=False, specific_list=None):
+    """
+    Run monitoring check for all configured lists or a specific list.
+    
+    Args:
+        force_check (bool): If True, check all lists regardless of last check time
+        specific_list (str): If provided, only check this specific list
+    """
+    clear_terminal()
+    print("🔄 Running Monitor Check")
+    
+    config = load_monitor_config()
+    if not config["monitored_lists"]:
+        print("❌ No lists are currently being monitored.")
+        return
+    
+    # Get monitor interval in minutes
+    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+    print(f"ℹ️ Monitor interval: {interval_minutes} minutes")
+    
+    # Track overall progress
+    total_new_items = 0
+    total_errors = 0
+    total_duplicates = 0
+    processed_lists = 0
+    
+    # Get the list of lists to process
+    lists_to_process = []
+    if specific_list:
+        if specific_list in config["monitored_lists"]:
+            lists_to_process = [specific_list]
+        else:
+            print(f"❌ List '{specific_list}' not found in monitored lists.")
+            return
+    else:
+        lists_to_process = list(config["monitored_lists"].keys())
+    
+    # Process each list
+    for output_file in lists_to_process:
+        list_config = config["monitored_lists"][output_file]
+        
+        if not list_config.get("enabled", True) and not force_check:
+            print(f"⏭️ Skipping disabled list: {output_file}")
+            continue
+        
+        # Check if it's time to update this list
+        last_check = list_config.get("last_check")
+        current_time = datetime.now().timestamp()
+        
+        # Skip if it's not time yet, unless force_check is True
+        if not force_check and last_check:
+            last_check_time = float(last_check)
+            time_since_check = (current_time - last_check_time) / 60  # Convert to minutes
+            if time_since_check < interval_minutes:
+                time_remaining = interval_minutes - time_since_check
+                print(f"⏭️ Skipping {output_file} - checked {time_since_check:.1f} minutes ago (next check in {time_remaining:.1f} minutes)")
+                continue
+        
+        print(f"\n📝 Processing list: {output_file}")
+        scan_history = load_scan_history()
+        
+        # Process each URL for this list
+        all_titles = []
+        for url_entry in list_config["urls"]:
+            url = url_entry["url"]
+            print(f"🌐 Fetching: {url}")
+            
+            start_time = time.time()
+            titles = scrape_all_pages(url)
+            
+            url_entry["last_check"] = current_time
+            url_entry["title_count"] = len(titles) if titles else 0
+            
+            elapsed = time.time() - start_time
+            print(f"✅ Found {len(titles) if titles else 0} titles in {elapsed:.1f} seconds")
+            
+            if titles:
+                all_titles.extend(titles)
+        
+        # Update the last check time for this list
+        list_config["last_check"] = current_time
+        
+        # Save merged results to the output file
+        if all_titles:
+            print(f"📊 Processing {len(all_titles)} total titles from all URLs")
+            
+            # Get settings from environment
+            enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
+            include_year = get_env_flag("INCLUDE_YEAR", "true")
+            
+            new_count, skipped_count, cached_count = process_scrape_results(
+                all_titles, output_file, scan_history,
+                enable_tmdb=enable_tmdb, include_year=include_year
+            )
+            
+            print(f"✅ Added {new_count} new titles to {output_file}")
+            
+            # Update total added count for each URL
+            for url_entry in list_config["urls"]:
+                url_entry["total_added"] = url_entry.get("total_added", 0) + (new_count // len(list_config["urls"]))
+            
+            total_new_items += new_count
+            
+            # Check for errors in the output file
+            full_path = get_output_filepath(output_file)
+            errors = find_error_entries(full_path)
+            error_count = len(errors)
+            total_errors += error_count
+            
+            # Store error count in list config
+            list_config["error_count"] = error_count
+            if error_count > 0:
+                print(f"⚠️ Found {error_count} errors in the list")
+            
+            # Check for duplicates
+            duplicates = find_duplicate_entries_ultrafast(full_path)
+            duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values()) if duplicates else 0
+            total_duplicates += duplicate_count
+            
+            # Store duplicate count in list config
+            list_config["duplicate_count"] = duplicate_count
+            if duplicate_count > 0:
+                print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+                
+            # Ask if user wants to auto-fix errors and duplicates
+            if error_count > 0 or duplicate_count > 0:
+                if input("Would you like to auto-fix errors and duplicates? (y/N): ").lower() == 'y':
+                    # Fix errors first
+                    if error_count > 0:
+                        print(f"\n🔧 Fixing {error_count} errors...")
+                        with open(full_path, "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                        total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                        print(f"✅ Fixed {total_fixed} of {error_count} errors")
+                        
+                        # Update error count in config
+                        list_config["error_count"] = error_count - total_fixed
+                    
+                    # Then fix duplicates
+                    if duplicate_count > 0:
+                        print(f"\n🔧 Removing {duplicate_count} duplicate entries...")
+                        lines_to_keep = set()
+                        
+                        for title, occurrences in duplicates.items():
+                            best_line = select_best_duplicate_line(occurrences)
+                            lines_to_keep.add(best_line["line_num"])
+                        
+                        # Also keep lines that aren't duplicates
+                        with open(full_path, "r", encoding="utf-8") as f:
+                            for i, line in enumerate(f, 1):
+                                is_duplicate = False
+                                for title, occurrences in duplicates.items():
+                                    if i in [occ["line_num"] for occ in occurrences]:
+                                        is_duplicate = True
+                                        break
+                                
+                                if not is_duplicate:
+                                    lines_to_keep.add(i)
+                        
+                        remove_duplicate_lines(full_path, lines_to_keep)
+                        print(f"✅ Removed {duplicate_count} duplicate entries")
+                        
+                        # Update duplicate count in config
+                        list_config["duplicate_count"] = 0
+        else:
+            print("⚠️ No titles found from any URL in this list")
+        
+        processed_lists += 1
+    
+    # Update the last overall run time and save the config
+    config["last_run"] = current_time
+    save_monitor_config(config)
+    
+    print(f"\n✅ Monitor check complete: processed {processed_lists} lists, added {total_new_items} new items")
+    if total_errors > 0 or total_duplicates > 0:
+        print(f"⚠️ Found {total_errors} errors and {total_duplicates} duplicates across all lists")
+    
+    return total_new_items
+
 def save_monitor_config(config):
     """Save the monitor configuration to file"""
     with open(MONITOR_CONFIG_FILE, "w", encoding="utf-8") as f:
@@ -1464,6 +1643,185 @@ def run_monitor_settings():
             print(f"✅ Monitor interval updated to {new_interval} minutes")
             
     input("Press Enter to continue...")
+
+def run_monitor_check(force_check=False, specific_list=None):
+    """
+    Run monitoring check for all configured lists or a specific list.
+    
+    Args:
+        force_check (bool): If True, check all lists regardless of last check time
+        specific_list (str): If provided, only check this specific list
+    """
+    clear_terminal()
+    print("🔄 Running Monitor Check")
+    
+    config = load_monitor_config()
+    if not config["monitored_lists"]:
+        print("❌ No lists are currently being monitored.")
+        return
+    
+    # Get monitor interval in minutes
+    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+    print(f"ℹ️ Monitor interval: {interval_minutes} minutes")
+    
+    # Track overall progress
+    total_new_items = 0
+    total_errors = 0
+    total_duplicates = 0
+    processed_lists = 0
+    
+    # Get the list of lists to process
+    lists_to_process = []
+    if specific_list:
+        if specific_list in config["monitored_lists"]:
+            lists_to_process = [specific_list]
+        else:
+            print(f"❌ List '{specific_list}' not found in monitored lists.")
+            return
+    else:
+        lists_to_process = list(config["monitored_lists"].keys())
+    
+    # Process each list
+    for output_file in lists_to_process:
+        list_config = config["monitored_lists"][output_file]
+        
+        if not list_config.get("enabled", True) and not force_check:
+            print(f"⏭️ Skipping disabled list: {output_file}")
+            continue
+        
+        # Check if it's time to update this list
+        last_check = list_config.get("last_check")
+        current_time = datetime.now().timestamp()
+        
+        # Skip if it's not time yet, unless force_check is True
+        if not force_check and last_check:
+            last_check_time = float(last_check)
+            time_since_check = (current_time - last_check_time) / 60  # Convert to minutes
+            if time_since_check < interval_minutes:
+                time_remaining = interval_minutes - time_since_check
+                print(f"⏭️ Skipping {output_file} - checked {time_since_check:.1f} minutes ago (next check in {time_remaining:.1f} minutes)")
+                continue
+        
+        print(f"\n📝 Processing list: {output_file}")
+        scan_history = load_scan_history()
+        
+        # Process each URL for this list
+        all_titles = []
+        for url_entry in list_config["urls"]:
+            url = url_entry["url"]
+            print(f"🌐 Fetching: {url}")
+            
+            start_time = time.time()
+            titles = scrape_all_pages(url)
+            
+            url_entry["last_check"] = current_time
+            url_entry["title_count"] = len(titles) if titles else 0
+            
+            elapsed = time.time() - start_time
+            print(f"✅ Found {len(titles) if titles else 0} titles in {elapsed:.1f} seconds")
+            
+            if titles:
+                all_titles.extend(titles)
+        
+        # Update the last check time for this list
+        list_config["last_check"] = current_time
+        
+        # Save merged results to the output file
+        if all_titles:
+            print(f"📊 Processing {len(all_titles)} total titles from all URLs")
+            
+            # Get settings from environment
+            enable_tmdb = get_env_flag("ENABLE_TMDB", "true")
+            include_year = get_env_flag("INCLUDE_YEAR", "true")
+            
+            new_count, skipped_count, cached_count = process_scrape_results(
+                all_titles, output_file, scan_history,
+                enable_tmdb=enable_tmdb, include_year=include_year
+            )
+            
+            print(f"✅ Added {new_count} new titles to {output_file}")
+            
+            # Update total added count for each URL
+            for url_entry in list_config["urls"]:
+                url_entry["total_added"] = url_entry.get("total_added", 0) + (new_count // len(list_config["urls"]))
+            
+            total_new_items += new_count
+            
+            # Check for errors in the output file
+            full_path = get_output_filepath(output_file)
+            errors = find_error_entries(full_path)
+            error_count = len(errors)
+            total_errors += error_count
+            
+            # Store error count in list config
+            list_config["error_count"] = error_count
+            if error_count > 0:
+                print(f"⚠️ Found {error_count} errors in the list")
+            
+            # Check for duplicates
+            duplicates = find_duplicate_entries_ultrafast(full_path)
+            duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values()) if duplicates else 0
+            total_duplicates += duplicate_count
+            
+            # Store duplicate count in list config
+            list_config["duplicate_count"] = duplicate_count
+            if duplicate_count > 0:
+                print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+                
+            # Ask if user wants to auto-fix errors and duplicates
+            if error_count > 0 or duplicate_count > 0:
+                if input("Would you like to auto-fix errors and duplicates? (y/N): ").lower() == 'y':
+                    # Fix errors first
+                    if error_count > 0:
+                        print(f"\n🔧 Fixing {error_count} errors...")
+                        with open(full_path, "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                        total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                        print(f"✅ Fixed {total_fixed} of {error_count} errors")
+                        
+                        # Update error count in config
+                        list_config["error_count"] = error_count - total_fixed
+                    
+                    # Then fix duplicates
+                    if duplicate_count > 0:
+                        print(f"\n🔧 Removing {duplicate_count} duplicate entries...")
+                        lines_to_keep = set()
+                        
+                        for title, occurrences in duplicates.items():
+                            best_line = select_best_duplicate_line(occurrences)
+                            lines_to_keep.add(best_line["line_num"])
+                        
+                        # Also keep lines that aren't duplicates
+                        with open(full_path, "r", encoding="utf-8") as f:
+                            for i, line in enumerate(f, 1):
+                                is_duplicate = False
+                                for title, occurrences in duplicates.items():
+                                    if i in [occ["line_num"] for occ in occurrences]:
+                                        is_duplicate = True
+                                        break
+                                
+                                if not is_duplicate:
+                                    lines_to_keep.add(i)
+                        
+                        remove_duplicate_lines(full_path, lines_to_keep)
+                        print(f"✅ Removed {duplicate_count} duplicate entries")
+                        
+                        # Update duplicate count in config
+                        list_config["duplicate_count"] = 0
+        else:
+            print("⚠️ No titles found from any URL in this list")
+        
+        processed_lists += 1
+    
+    # Update the last overall run time and save the config
+    config["last_run"] = current_time
+    save_monitor_config(config)
+    
+    print(f"\n✅ Monitor check complete: processed {processed_lists} lists, added {total_new_items} new items")
+    if total_errors > 0 or total_duplicates > 0:
+        print(f"⚠️ Found {total_errors} errors and {total_duplicates} duplicates across all lists")
+    
+    return total_new_items
 
 def run_monitor_scraper():
     """User interface for monitoring lists"""
