@@ -78,8 +78,31 @@ def load_scan_history():
     return {}
 
 def save_scan_history(history):
+    """
+    Save scan history to JSON file, merging with existing data rather than overwriting
+    """
+    # Load existing history if file exists
+    existing_history = {}
+    if os.path.exists(SCAN_HISTORY_FILE):
+        try:
+            with open(SCAN_HISTORY_FILE, "r", encoding="utf-8") as f:
+                existing_history = json.load(f)
+        except json.JSONDecodeError:
+            print(f"⚠️ Warning: {SCAN_HISTORY_FILE} contains invalid JSON. Creating new file.")
+    
+    # Merge new history with existing history
+    # This updates existing keys and adds new ones
+    for filename, entries in history.items():
+        if filename in existing_history:
+            # If the filename exists, add new entries to it
+            existing_history[filename].update(entries)
+        else:
+            # If the filename is new, add the whole entry
+            existing_history[filename] = entries
+            
+    # Write the merged history back to file
     with open(SCAN_HISTORY_FILE, "w", encoding="utf-8") as f:
-        json.dump(history, f, indent=2, ensure_ascii=False)
+        json.dump(existing_history, f, indent=2, ensure_ascii=False)
 
 def clear_history(option="all", file_name=None):
     history = load_scan_history()
@@ -1220,6 +1243,201 @@ def process_auto_fix_errors(errors, lines, file_path):
     
     return total_fixed
 
+def fix_errors_menu():
+    """Menu for fixing errors in list files"""
+    while True:
+        clear_terminal()
+        print("🔧 Fix Errors Menu")
+        print("1. Fix errors in a single file")
+        print("2. Manual TMDB search for a title")
+        print("3. Return to main menu")
+
+        choice = input("\nChoose an option (1-3): ").strip()
+
+        if choice == "1":
+            filepath = input("Enter file path to fix: ").strip()
+            full_path = get_output_filepath(filepath)
+            
+            if not os.path.exists(full_path):
+                print(f"❌ File not found: {full_path}")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"🔍 Scanning for errors in {filepath}...")
+            errors = find_error_entries(full_path)
+            
+            if not errors:
+                print("✅ No errors found!")
+                input("Press Enter to continue...")
+                continue
+                
+            print(f"⚠️ Found {len(errors)} error entries")
+            print("🤖 Auto-fix mode - will attempt to match all titles")
+            
+            # Ask for confirmation before starting the potentially time-consuming operation
+            if input("Continue with auto-fixing? (y/N): ").lower() != 'y':
+                continue
+            
+            # Read file content
+            with open(full_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            # Process errors with caching
+            total_fixed = process_auto_fix_errors(errors, lines, full_path)
+            
+            # Notify if some entries couldn't be fixed
+            if total_fixed < len(errors):
+                print(f"⚠️ {len(errors) - total_fixed} entries still need manual fixing")
+            
+            input("Press Enter to continue...")
+        elif choice == "2":
+            manual_tmdb_search()
+        elif choice == "3":
+            return
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
+
+def manual_tmdb_search():
+    """Manually search TMDB for a title and update its entry in a file"""
+    clear_terminal()
+    print("🔍 Manual TMDB Search")
+    
+    # Get the file path
+    filepath = input("Enter file path to modify: ").strip()
+    full_path = get_output_filepath(filepath)
+    
+    if not os.path.exists(full_path):
+        print(f"❌ File not found: {full_path}")
+        input("Press Enter to continue...")
+        return
+    
+    # Get the title to search for
+    search_title = input("Enter title to search on TMDB: ").strip()
+    if not search_title:
+        print("❌ No title provided.")
+        input("Press Enter to continue...")
+        return
+    
+    # First check if we should search for TV show or movie
+    print("\nSearch as:")
+    print("1. TV Show")
+    print("2. Movie")
+    print("3. Try both (TV first, then Movie)")
+    
+    media_choice = input("Choose an option (1-3) [3]: ").strip() or "3"
+    
+    # Perform the TMDB search
+    print(f"\n🔍 Searching TMDB for '{search_title}'...")
+    result = None
+    
+    if media_choice == "1":
+        # Search for TV shows only
+        result = search_tmdb_media(search_title, "tv")
+    elif media_choice == "2":
+        # Search for movies only
+        result = search_tmdb_media(search_title, "movie")
+    else:
+        # Try both (default)
+        result = match_title_with_tmdb(search_title)
+    
+    # Show results
+    if result == "[Error]":
+        print("❌ No matches found on TMDB.")
+        input("Press Enter to continue...")
+        return
+    
+    # Display the matching result
+    media_type = result.get('type', 'tv')
+    year = result.get('year', 'Unknown year')
+    tmdb_id = result.get('id')
+    
+    print(f"\n✅ Found match on TMDB:")
+    print(f"Title: {search_title}")
+    print(f"Type: {media_type.upper()}")
+    print(f"Year: {year}")
+    print(f"TMDB ID: {tmdb_id}")
+    
+    # Ask for confirmation before updating the file
+    if input("\nUpdate this entry in the file? (y/N): ").lower() != 'y':
+        input("Operation cancelled. Press Enter to continue...")
+        return
+    
+    # Read file content
+    with open(full_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    
+    # Look for matching lines
+    matches = []
+    for i, line in enumerate(lines):
+        if search_title.lower() in line.lower():
+            matches.append((i, line.strip()))
+    
+    # If multiple matches found, let the user choose which one to update
+    match_index = None
+    if len(matches) > 1:
+        print(f"\nFound {len(matches)} lines with matching titles:")
+        for idx, (line_num, line_content) in enumerate(matches):
+            print(f"{idx+1}. Line {line_num+1}: {line_content}")
+        
+        choice = input("\nChoose a line to update (number) or 0 to cancel: ")
+        try:
+            choice_num = int(choice)
+            if choice_num < 1 or choice_num > len(matches):
+                if choice_num != 0:  # 0 is cancel
+                    print("❌ Invalid choice.")
+                input("Press Enter to continue...")
+                return
+            
+            match_index = matches[choice_num-1][0] if choice_num > 0 else None
+        except ValueError:
+            print("❌ Invalid input.")
+            input("Press Enter to continue...")
+            return
+    elif len(matches) == 1:
+        match_index = matches[0][0]
+    else:
+        # No exact matches, ask if the user wants to append a new entry
+        print("⚠️ No matching lines found in the file.")
+        if input("Would you like to append the entry as a new line? (y/N): ").lower() == 'y':
+            # Create a new entry and append to the file
+            year_str = f" ({year})" if year and year != "Unknown year" else ""
+            if media_type == "movie":
+                new_line = f"{search_title}{year_str} [movie:{tmdb_id}]\n"
+            else:
+                new_line = f"{search_title}{year_str} [{tmdb_id}]\n"
+            
+            with open(full_path, "a", encoding="utf-8") as f:
+                f.write(new_line)
+            
+            print(f"✅ Added new entry: {new_line.strip()}")
+            input("Press Enter to continue...")
+            return
+        else:
+            input("Operation cancelled. Press Enter to continue...")
+            return
+    
+    # Update the matching line
+    if match_index is not None:
+        # Extract original title from the line (preserve the exact title)
+        original_title = lines[match_index].split("->")[0].split("[")[0].strip()
+        
+        year_str = f" ({year})" if year and year != "Unknown year" else ""
+        if media_type == "movie":
+            new_line = f"{original_title}{year_str} [movie:{tmdb_id}]\n"
+        else:
+            new_line = f"{original_title}{year_str} [{tmdb_id}]\n"
+        
+        # Update the line
+        lines[match_index] = new_line
+        
+        # Save the changes
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        
+        print(f"✅ Updated entry: {new_line.strip()}")
+    
+    input("Press Enter to continue...")
+
 def process_file_queue(file_queue):
     """Process multiple files for both duplicates and errors"""
     # Settings
@@ -1330,9 +1548,10 @@ def fix_errors_menu():
         clear_terminal()
         print("🔧 Fix Errors Menu")
         print("1. Fix errors in a single file")
-        print("2. Return to main menu")
+        print("2. Manual TMDB search for a title")
+        print("3. Return to main menu")
 
-        choice = input("\nChoose an option (1-2): ").strip()
+        choice = input("\nChoose an option (1-3): ").strip()
 
         if choice == "1":
             filepath = input("Enter file path to fix: ").strip()
@@ -1371,6 +1590,8 @@ def fix_errors_menu():
             
             input("Press Enter to continue...")
         elif choice == "2":
+            manual_tmdb_search()
+        elif choice == "3":
             return
         else:
             input("❌ Invalid option. Press Enter to continue...")
@@ -1548,7 +1769,7 @@ def main_menu():
     """Main menu for the application"""
     while True:
         clear_terminal()
-        print("📋 Parsely - TV Show List Manager")
+        print("📋 Parsely - Media List Manager")
         print("1. Run Scraper (Single URL)")
         print("2. Batch Scraper (Multiple URLs)")
         print("3. Monitor Scraper")
