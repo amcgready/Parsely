@@ -1,9 +1,9 @@
-version: '3.8'
-
 services:
   parsely:
     build: .
     container_name: parsely
+    tty: true
+    stdin_open: true
     volumes:
       - ./data:/app/data
       - ./.env:/app/.env
