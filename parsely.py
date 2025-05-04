@@ -279,9 +279,11 @@ def manage_monitored_lists():
                 last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %H:%M")
             else:
                 last_check_time = "Never"
+            
+            # Extract just the filename from the path
+            display_name = os.path.basename(list_name)
                 
-            print(f"{i:<3} {list_name:<30} {status:<10} {url_count:<6} {last_check_time:<20}")
-        
+            print(f"{i:<3} {display_name:<30} {status:<10} {url_count:<6} {last_check_time:<20}")
         print("\nOptions:")
         print("1. View/Edit list details")
         print("2. Enable/Disable a list")
