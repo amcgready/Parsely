@@ -2787,7 +2787,7 @@ def main_menu():
     """Main menu for the application"""
     while True:
         clear_terminal()
-        print("📋 Parsely - Media List Manager")
+        print("🌿 Parsely - Web Scraping Utility")
         print("1. Run Scraper (Single URL)")
         print("2. Batch Scraper (Multiple URLs)")
         print("3. Monitor Scraper")
