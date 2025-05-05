@@ -276,10 +276,23 @@ def manage_monitored_lists():
             # Format last check time
             last_check = list_config.get("last_check")
             if last_check:
-                last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %H:%M")
+                # Get timezone from environment or use local timezone
+                tz_name = get_env_string("TIMEZONE", "")
+                try:
+                    # Use specified timezone if available
+                    if tz_name:
+                        import pytz
+                        tz = pytz.timezone(tz_name)
+                        last_check_time = datetime.fromtimestamp(float(last_check), tz).strftime("%Y-%m-%d %I:%M %p")
+                    else:
+                        # Use local timezone with AM/PM format
+                        last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %I:%M %p")
+                except (ImportError, pytz.exceptions.UnknownTimeZoneError):
+                    # Fallback if pytz isn't installed or timezone is invalid
+                    last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %I:%M %p")
             else:
                 last_check_time = "Never"
-            
+
             # Extract just the filename from the path
             display_name = os.path.basename(list_name)
                 
