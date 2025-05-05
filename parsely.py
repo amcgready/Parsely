@@ -302,9 +302,10 @@ def manage_monitored_lists():
         print("2. Enable/Disable a list")
         print("3. Delete a list")
         print("4. Add a new list")
-        print("5. Return to monitor menu")
+        print("5. Add URLs from a file")
+        print("6. Return to monitor menu")
         
-        choice = input("\nChoose an option (1-5): ").strip()
+        choice = input("\nChoose an option (1-6): ").strip()
         
         if choice == "1":
             # View/Edit list details
@@ -381,8 +382,12 @@ def manage_monitored_lists():
         elif choice == "4":
             # Add a new list
             add_monitor_url()
-            
+        
         elif choice == "5":
+            # Add URLs from a file
+            add_monitor_urls_from_file()
+            
+        elif choice == "6":
             # Return to monitor menu
             return
             
@@ -390,127 +395,219 @@ def manage_monitored_lists():
             print("❌ Invalid choice")
             time.sleep(1)
 
-def edit_list_details(list_name, config):
-    """
-    View and edit details of a specific monitored list
-    """
-    while True:
-        clear_terminal()
-        list_config = config["monitored_lists"][list_name]
-        urls = list_config.get("urls", [])
-        
-        print(f"📝 List Details: {list_name}")
-        print(f"Status: {'✅ Active' if list_config.get('enabled', True) else '❌ Disabled'}")
-        
-        # Format last check time
-        last_check = list_config.get("last_check")
-        if last_check:
-            last_check_time = datetime.fromtimestamp(float(last_check)).strftime("%Y-%m-%d %H:%M")
-        else:
-            last_check_time = "Never"
+def add_monitor_urls_from_file():
+    """Add multiple URLs to monitor from a text file (one per line)"""
+    clear_terminal()
+    print("📂 Add URLs from File")
+    
+    # Get file path from user
+    file_path = input("Enter path to file containing URLs (one per line): ").strip()
+    
+    if not file_path or not os.path.exists(file_path):
+        print("❌ File not found or invalid path.")
+        input("Press Enter to continue...")
+        return
+    
+    # Try to read the file
+    urls = []
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            urls = [line.strip() for line in f if line.strip() and line.strip().startswith(("http://", "https://"))]
+    except Exception as e:
+        print(f"❌ Error reading file: {str(e)}")
+        input("Press Enter to continue...")
+        return
+    
+    if not urls:
+        print("❌ No valid URLs found in the file.")
+        input("Press Enter to continue...")
+        return
+    
+    print(f"📋 Found {len(urls)} valid URLs in the file.")
+    
+    # Ask if user wants single destination or multiple
+    print("\nDo you want to:")
+    print("1. Use one destination for all URLs")
+    print("2. Set individual destinations for each URL")
+    dest_choice = input("\nChoose an option (1-2): ").strip()
+    
+    # Load monitor config
+    config = load_monitor_config()
+    added_count = 0
+    
+    if dest_choice == "1":
+        # One destination for all URLs
+        output_file = input("\nEnter output file path for all URLs: ").strip()
+        if not output_file:
+            print("❌ No output file provided.")
+            input("Press Enter to continue...")
+            return
             
-        print(f"Last Check: {last_check_time}")
+        # Add .txt extension if missing
+        if not output_file.endswith('.txt'):
+            output_file += '.txt'
         
-        # Display URLs
-        print("\nMonitored URLs:")
-        print("-" * 80)
-        if not urls:
-            print("No URLs configured for this list")
-        else:
-            for i, url_entry in enumerate(urls, 1):
-                url = url_entry["url"]
-                title_count = url_entry.get("title_count", 0)
-                total_added = url_entry.get("total_added", 0)
-                print(f"{i}. {url} ({title_count} titles, {total_added} added)")
-        print("-" * 80)
+        # Initialize list entry if needed
+        if output_file not in config["monitored_lists"]:
+            config["monitored_lists"][output_file] = {
+                "enabled": True,
+                "last_check": None,
+                "error_count": 0,
+                "duplicate_count": 0,
+                "urls": []
+            }
         
-        print("\nOptions:")
-        print("1. Add URL")
-        print("2. Remove URL")
-        print("3. Run Check on this list")
-        print("4. Return to list management")
-        
-        choice = input("\nChoose an option (1-4): ").strip()
-        
-        if choice == "1":
-            # Add URL
-            url = input("Enter URL to monitor (or 'back'): ").strip()
-            if url.lower() == 'back':
-                continue
-                
-            # Validate URL
-            if not url.startswith(('http://', 'https://')):
-                print("❌ Invalid URL format. Please include http:// or https://")
-                input("Press Enter to continue...")
-                continue
-                
+        # Add each URL to the list
+        for url in urls:
             # Check if URL already exists in this list
             url_exists = False
-            for url_entry in urls:
-                if url_entry["url"] == url:
+            for url_entry in config["monitored_lists"][output_file].get("urls", []):
+                if isinstance(url_entry, dict) and url_entry.get("url") == url:
                     url_exists = True
                     break
-                    
+                elif isinstance(url_entry, str) and url_entry == url:
+                    url_exists = True
+                    break
+                
             if url_exists:
-                print(f"⚠️ URL already exists in this list")
+                print(f"⚠️ URL already exists in list '{output_file}': {url}")
             else:
-                # Add the new URL
-                if "urls" not in list_config:
-                    list_config["urls"] = []
-                    
-                list_config["urls"].append({
+                # Add URL to config
+                config["monitored_lists"][output_file]["urls"].append({
                     "url": url,
                     "last_check": None,
                     "title_count": 0,
                     "total_added": 0
                 })
-                
-                # Save the updated config
-                save_monitor_config(config)
-                print(f"✅ Added URL to list '{list_name}'")
-                
-            input("Press Enter to continue...")
+                added_count += 1
+                print(f"✅ Added: {url}")
+    
+    elif dest_choice == "2":
+        # Individual destinations for each URL
+        for url in urls:
+            print(f"\n🌐 URL: {url}")
+            output_file = input("Enter output file path (or press Enter to skip): ").strip()
             
-        elif choice == "2":
-            # Remove URL
-            if not urls:
-                print("❌ No URLs to remove")
-                input("Press Enter to continue...")
+            if not output_file:
+                print("⏩ Skipping this URL.")
                 continue
-                
-            url_index = input("Enter URL number to remove (or 'back'): ").strip()
-            if url_index.lower() == 'back':
-                continue
-                
-            try:
-                url_index = int(url_index)
-                if 1 <= url_index <= len(urls):
-                    removed_url = urls[url_index - 1]["url"]
-                    del urls[url_index - 1]
-                    save_monitor_config(config)
-                    print(f"✅ Removed URL: {removed_url}")
-                else:
-                    print("❌ Invalid URL number")
-            except ValueError:
-                print("❌ Please enter a number")
-                
-            input("Press Enter to continue...")
             
-        elif choice == "3":
-            # Run Check on this list
-            if input("Do you want to force check this list? (y/N): ").lower() == 'y':
-                run_monitor_check(force_check=True, specific_list=list_name)
+            # Add .txt extension if missing
+            if not output_file.endswith('.txt'):
+                output_file += '.txt'
+            
+            # Check if URL already exists in this list
+            url_exists = False
+            if output_file in config["monitored_lists"]:
+                for url_entry in config["monitored_lists"][output_file].get("urls", []):
+                    if isinstance(url_entry, dict) and url_entry.get("url") == url:
+                        url_exists = True
+                        break
+                    elif isinstance(url_entry, str) and url_entry == url:
+                        url_exists = True
+                        break
+            
+            if url_exists:
+                print(f"⚠️ URL already exists in list '{output_file}'")
+                continue
+            
+            # Initialize list entry if needed
+            if output_file not in config["monitored_lists"]:
+                config["monitored_lists"][output_file] = {
+                    "enabled": True,
+                    "last_check": None,
+                    "error_count": 0,
+                    "duplicate_count": 0,
+                    "urls": []
+                }
+            
+            # Add URL to config
+            config["monitored_lists"][output_file]["urls"].append({
+                "url": url,
+                "last_check": None,
+                "title_count": 0,
+                "total_added": 0
+            })
+            added_count += 1
+            print(f"✅ Added to '{output_file}'")
+    else:
+        print("❌ Invalid option.")
+        input("Press Enter to continue...")
+        return
+    
+    # Save updated config
+    save_monitor_config(config)
+    
+    print(f"\n🎉 Successfully added {added_count} new URLs to monitor")
+    
+    # Ask if user wants to run a check now
+    if added_count > 0 and input("\nDo you want to run a check on the new lists now? (y/N): ").lower() == 'y':
+        run_monitor_check(force_check=True)
+        
+    input("\nPress Enter to continue...")
+
+def run_monitor_scraper():
+    """User interface for monitoring lists"""
+    while True:
+        clear_terminal()
+        print("🔍 Monitor Scraper")
+        
+        config = load_monitor_config()
+        
+        # Check if any lists are configured
+        if not config["monitored_lists"]:
+            print("❌ No lists are currently being monitored.")
+            print("Please add lists to monitor first.")
+            if input("Would you like to add a list to monitor now? (y/N): ").lower() == 'y':
+                add_monitor_url()
             else:
-                run_monitor_check(force_check=False, specific_list=list_name)
-            input("Press Enter to continue...")
-            
-        elif choice == "4":
-            # Return to list management
+                input("Press Enter to continue...")
             return
+        
+        interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+        print(f"📋 Found {len(config['monitored_lists'])} monitored lists (checking every {format_minutes(interval_minutes)})")
+        
+        # Count total errors and duplicates
+        total_errors = 0
+        total_duplicates = 0
+        for list_config in config["monitored_lists"].values():
+            total_errors += list_config.get("error_count", 0)
+            total_duplicates += list_config.get("duplicate_count", 0)
             
+        if total_errors > 0:
+            print(f"⚠️ {total_errors} total errors found across all lists")
+        if total_duplicates > 0:
+            print(f"⚠️ {total_duplicates} total duplicates found across all lists")
+        
+        print("\n1. Run monitor check now")
+        print("2. Add a URL to monitor")
+        print("3. Add URLs from file")
+        print("4. View and manage monitored lists")
+        print("5. Check monitor progress status")
+        print("6. Configure monitor settings")
+        print("7. Return to main menu")
+        
+        choice = input("\nChoose an option (1-7): ").strip()
+        
+        if choice == "1":
+            # Run a manual check
+            force_check = input("Force check all lists regardless of timing? (y/N): ").lower() == 'y'
+            run_monitor_check(force_check=force_check)
+            input("\nCheck complete. Press Enter to continue...")
+        elif choice == "2":
+            add_monitor_url()
+        elif choice == "3":
+            add_monitor_urls_from_file()
+        elif choice == "4":
+            manage_monitored_lists()
+        elif choice == "5":
+            check_monitor_progress()
+        elif choice == "6":
+            run_monitor_settings()
+        elif choice == "7":
+            return
         else:
-            print("❌ Invalid choice")
-            time.sleep(1)
+            input("❌ Invalid option. Press Enter to continue...")
 
 def load_monitor_config():
     """Load the monitor configuration from file"""
@@ -2303,12 +2400,13 @@ def run_monitor_scraper():
         
         print("\n1. Run monitor check now")
         print("2. Add a URL to monitor")
-        print("3. View and manage monitored lists")
-        print("4. Check monitor progress status")
-        print("5. Configure monitor settings")
-        print("6. Return to main menu")
+        print("3. Add URLs from file")
+        print("4. View and manage monitored lists")
+        print("5. Check monitor progress status")
+        print("6. Configure monitor settings")
+        print("7. Return to main menu")
         
-        choice = input("\nChoose an option (1-6): ").strip()
+        choice = input("\nChoose an option (1-7): ").strip()
         
         if choice == "1":
             # Run a manual check
@@ -2318,12 +2416,14 @@ def run_monitor_scraper():
         elif choice == "2":
             add_monitor_url()
         elif choice == "3":
-            manage_monitored_lists()
+            add_monitor_urls_from_file()
         elif choice == "4":
-            check_monitor_progress()
+            manage_monitored_lists()
         elif choice == "5":
-            run_monitor_settings()
+            check_monitor_progress()
         elif choice == "6":
+            run_monitor_settings()
+        elif choice == "7":
             return
         else:
             input("❌ Invalid option. Press Enter to continue...")
