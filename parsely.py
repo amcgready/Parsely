@@ -2113,12 +2113,13 @@ def fix_errors_menu():
     while True:
         clear_terminal()
         print("🔧 Fix Errors Menu")
-        print("1. Fix errors in a single file")
-        print("2. Fix errors in all monitored list files")
-        print("3. Manual TMDB search for a title")
-        print("4. Return to main menu")
+        print("1. Auto-fix errors in a single file")
+        print("2. Edit errors one by one in a file")
+        print("3. Fix errors in all monitored list files")
+        print("4. Manual TMDB search for a title")
+        print("5. Return to main menu")
 
-        choice = input("\nChoose an option (1-4): ").strip()
+        choice = input("\nChoose an option (1-5): ").strip()
 
         if choice == "1":
             filepath = input("Enter file path to fix: ").strip()
@@ -2154,9 +2155,17 @@ def fix_errors_menu():
             # Notify if some entries couldn't be fixed
             if total_fixed < len(errors):
                 print(f"⚠️ {len(errors) - total_fixed} entries still need manual fixing")
+                if input("Would you like to edit the remaining errors one by one? (y/N): ").lower() == 'y':
+                    edit_errors_one_by_one(filepath)
             
             input("Press Enter to continue...")
+            
         elif choice == "2":
+            filepath = input("Enter file path to edit: ").strip()
+            edit_errors_one_by_one(filepath)
+            input("Press Enter to continue...")
+            
+        elif choice == "3":
             # Fix errors in all monitored lists
             config = load_monitor_config()
             if not config["monitored_lists"]:
@@ -2165,7 +2174,7 @@ def fix_errors_menu():
                 continue
                 
             print(f"📋 Found {len(config['monitored_lists'])} monitored lists")
-            if input("Run error fixing on all monitored lists? (y/N): ").lower() == 'y':
+            if input("Run error fixing on all monitored lists? (y/N): ").lower() != 'y':
                 continue
                 
             # Process each monitored list
@@ -2197,10 +2206,13 @@ def fix_errors_menu():
                     print(f"⚠️ {len(errors) - total_fixed} entries still need manual fixing")
                     
             input("\nCompleted processing all lists. Press Enter to continue...")
-        elif choice == "3":
-            manual_tmdb_search()
+            
         elif choice == "4":
+            manual_tmdb_search()
+            
+        elif choice == "5":
             return
+            
         else:
             input("❌ Invalid option. Press Enter to continue...")
 
