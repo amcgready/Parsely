@@ -2970,111 +2970,74 @@ def format_minutes(minutes):
         return f"{int(days)}d {int(hours)}h"
 
 def check_monitor_progress():
-    """Display comprehensive monitoring progress/status for all lists"""
+    """Display the current monitoring progress and maintenance options."""
     clear_terminal()
-    print("📊 Monitor Progress Status")
+    print("📊 Monitor Progress Status\n")
     
+    # Load the monitor configuration
     config = load_monitor_config()
     if not config["monitored_lists"]:
         print("❌ No lists are currently being monitored.")
-        input("Press Enter to return to the previous menu...")
+        input("\nPress Enter to return to monitor menu...")
         return
     
-    # Get the monitor interval for time remaining calculation
-    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
+    # Get the current time and interval settings
     current_time = datetime.now().timestamp()
+    interval_minutes = config.get("monitor_interval", DEFAULT_MONITOR_INTERVAL)
     
-    # Load error check history and duplicate check history if available
-    error_check_history = load_maintenance_history("error_checks")
-    duplicate_check_history = load_maintenance_history("duplicate_checks")
+    # Print header
+    print(f"{'List Name':<30} {'Status':<10} {'URLs':<6} {'Next scan':<15} {'Errors':<8} {'Dupes':<8}")
+    print("─" * 85)
     
-    print("\n{:<60} {:<15} {:<15} {:<15} {:<15}".format(
-        "List Path", "Status", "Last Scan", "Last Error Check", "Last Dupe Check"))
-    print("─" * 120)
-    
-    for output_file in config["monitored_lists"]:
-        list_config = config["monitored_lists"][output_file]
+    # Process each list
+    for list_path in sorted(config["monitored_lists"].keys()):
+        list_config = config["monitored_lists"][list_path]
         
-        # Get list status (enabled/disabled)
+        # Get basic list info
         status = "✅ Enabled" if list_config.get("enabled", True) else "❌ Disabled"
-        
-        # Calculate last scan time and next scheduled scan
-        last_scan_str = "Never"
-        time_remaining_str = "N/A"
-        
-        last_check = list_config.get("last_check")
-        if last_check:
-            last_check_time = float(last_check)
-            last_scan_str = format_timestamp(last_check_time)
-            
-            # Calculate time remaining until next check
-            time_since_check = (current_time - last_check_time) / 60  # Minutes
-            if time_since_check < interval_minutes:
-                time_remaining = interval_minutes - time_since_check
-                time_remaining_str = format_minutes(time_remaining)
-            else:
-                time_remaining_str = "Overdue"
-        
-        # Get last error check time
-        last_error_check_str = "Never"
-        if error_check_history and output_file in error_check_history:
-            last_error_check = error_check_history[output_file].get("last_check")
-            if last_error_check:
-                last_error_check_str = format_timestamp(last_error_check)
-        
-        # Get last duplicate check time
-        last_duplicate_check_str = "Never"
-        if duplicate_check_history and output_file in duplicate_check_history:
-            last_duplicate_check = duplicate_check_history[output_file].get("last_check")
-            if last_duplicate_check:
-                last_duplicate_check_str = format_timestamp(last_duplicate_check)
-        
-        # Format the output path to fit nicely in console
-        display_path = output_file
-        if len(display_path) > 57:
-            # Truncate the path but keep the filename
-            parts = output_file.split('/')
-            if len(parts) > 2:
-                display_path = "/.../" + "/".join(parts[-2:])
-            else:
-                display_path = "..." + display_path[-54:]
-        
-        print("{:<60} {:<15} {:<15} {:<15} {:<15}".format(
-            display_path, status, last_scan_str, last_error_check_str, last_duplicate_check_str))
-        
-        # Print additional data about next scheduled scan and error/duplicate counts
+        url_count = len(list_config.get("urls", []))
         error_count = list_config.get("error_count", 0)
         duplicate_count = list_config.get("duplicate_count", 0)
         
-        error_str = f"Errors: {error_count}" if error_count > 0 else "No errors"
-        duplicate_str = f"Dupes: {duplicate_count}" if duplicate_count > 0 else "No dupes"
+        # Calculate next scan time
+        last_check = float(list_config.get("last_check", 0)) if list_config.get("last_check") else 0
+        time_since_check = (current_time - last_check) / 60 if last_check else interval_minutes  # Convert to minutes
+        time_until_next = max(0, interval_minutes - time_since_check)
         
-        print("    URLs: {} | Next scan: {} | {} | {}".format(
-            len(list_config["urls"]),
-            time_remaining_str,
-            error_str,
-            duplicate_str
-        ))
+        # Format next scan time
+        if time_until_next <= 0:
+            next_scan = "Now"
+        elif time_until_next < 60:
+            next_scan = f"{int(time_until_next)}m"
+        else:
+            hours = int(time_until_next // 60)
+            minutes = int(time_until_next % 60)
+            next_scan = f"{hours}h {minutes}m"
         
-        # Add a separator between lists
-        print("─" * 120)
+        # Get just the filename from the path
+        list_name = os.path.basename(list_path)
+        
+        # Print list information
+        print(f"{list_name:<30} {status:<10} {url_count:<6} {next_scan:<15} {error_count:<8} {duplicate_count:<8}")
     
-    # Add option for maintenance
     print("\nMaintenance Options:")
     print("1. Run error check on all lists")
     print("2. Run duplicate check on all lists")
     print("3. Return to monitor menu")
     
-    choice = input("\nChoose an option (1-3): ").strip()
-    
+    choice = input("\nChoose an option (1-3): ")
     if choice == "1":
-        if input("Run error check on all monitored lists? (y/N): ").lower() == 'y':
-            run_bulk_error_check(config["monitored_lists"])
+        # Run error check
+        run_error_check_all_lists(config)
     elif choice == "2":
-        if input("Run duplicate check on all monitored lists? (y/N): ").lower() == 'y':
-            run_bulk_duplicate_check(config["monitored_lists"])
-    
-    input("\nPress Enter to continue...")
+        # Run duplicate check
+        run_duplicate_check_all_lists(config)
+    elif choice == "3":
+        return
+    else:
+        print("❌ Invalid option.")
+        time.sleep(1)
+        check_monitor_progress()  # Recursive call to refresh display
 
 def format_timestamp(timestamp):
     """Format a timestamp into a readable date string"""
