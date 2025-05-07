@@ -395,6 +395,186 @@ def manage_monitored_lists():
             print("❌ Invalid choice")
             time.sleep(1)
 
+def edit_list_details(list_path, config):
+    """
+    View and edit details of a monitored list
+    
+    Args:
+        list_path: Path to the list file
+        config: The monitor configuration
+    """
+    full_path = get_output_filepath(list_path)
+    list_name = os.path.basename(list_path)
+    list_config = config["monitored_lists"][list_path]
+    
+    while True:
+        clear_terminal()
+        print(f"📝 List Details: {list_name}")
+        print("─" * 60)
+        
+        # Display basic information
+        status = "✅ Active" if list_config.get("enabled", True) else "❌ Disabled"
+        print(f"Status: {status}")
+        
+        # Display last check time
+        if list_config.get("last_check"):
+            last_check_time = datetime.fromtimestamp(float(list_config["last_check"]))
+            last_check_str = last_check_time.strftime("%Y-%m-%d %I:%M %p")
+            print(f"Last check: {last_check_str}")
+        else:
+            print("Last check: Never")
+        
+        # Display error and duplicate counts
+        error_count = list_config.get("error_count", 0)
+        print(f"Errors: {error_count}")
+        
+        duplicate_count = list_config.get("duplicate_count", 0)
+        print(f"Duplicates: {duplicate_count}")
+        
+        # Check if the file exists
+        if not os.path.exists(full_path):
+            print("\n⚠️ Warning: File doesn't exist at specified path!")
+        else:
+            # Count total entries in the file
+            try:
+                with open(full_path, "r", encoding="utf-8") as f:
+                    line_count = sum(1 for _ in f)
+                print(f"Total entries: {line_count}")
+            except Exception as e:
+                print(f"Error reading file: {e}")
+        
+        # Display URLs
+        print("\nMonitored URLs:")
+        if not list_config.get("urls", []):
+            print("  No URLs configured")
+        else:
+            for i, url_entry in enumerate(list_config["urls"], 1):
+                url = url_entry["url"]
+                title_count = url_entry.get("title_count", 0)
+                print(f"  {i}. {url} ({title_count} titles)")
+        
+        # Options
+        print("\nOptions:")
+        print("1. Add URL")
+        print("2. Remove URL")
+        print("3. Run check now")
+        print("4. Fix errors")
+        print("5. Remove duplicates")
+        print("6. Edit errors one by one")
+        print("7. Return to list management")
+        
+        choice = input("\nChoose an option (1-7): ").strip()
+        
+        if choice == "1":
+            # Add URL
+            new_url = input("Enter URL to add: ").strip()
+            if new_url:
+                if "urls" not in list_config:
+                    list_config["urls"] = []
+                list_config["urls"].append({"url": new_url, "title_count": 0})
+                save_monitor_config(config)
+                print(f"✅ Added URL: {new_url}")
+                input("Press Enter to continue...")
+        
+        elif choice == "2":
+            # Remove URL
+            if not list_config.get("urls", []):
+                print("❌ No URLs to remove.")
+                input("Press Enter to continue...")
+                continue
+                
+            print("\nSelect URL to remove:")
+            for i, url_entry in enumerate(list_config["urls"], 1):
+                print(f"{i}. {url_entry['url']}")
+            
+            try:
+                url_index = int(input("\nEnter number (or 0 to cancel): ").strip()) - 1
+                if url_index >= 0 and url_index < len(list_config["urls"]):
+                    removed_url = list_config["urls"].pop(url_index)
+                    save_monitor_config(config)
+                    print(f"✅ Removed URL: {removed_url['url']}")
+                elif url_index != -1:  # Not cancel
+                    print("❌ Invalid selection.")
+            except ValueError:
+                print("❌ Invalid input. Please enter a number.")
+            
+            input("Press Enter to continue...")
+        
+        elif choice == "3":
+            # Run check now
+            run_monitor_check(force_check=True, specific_list=list_path)
+            # Reload config as it may have changed
+            config = load_monitor_config()
+            list_config = config["monitored_lists"][list_path]
+            input("Press Enter to continue...")
+        
+        elif choice == "4":
+            # Fix errors
+            errors = find_error_entries(full_path)
+            if not errors:
+                print("✅ No errors found!")
+            else:
+                print(f"⚠️ Found {len(errors)} errors")
+                if input(f"Fix {len(errors)} errors? (y/N): ").lower() == 'y':
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    total_fixed = process_auto_fix_errors(errors, lines, full_path)
+                    print(f"✅ Fixed {total_fixed} of {len(errors)} errors")
+                    # Update error count in config
+                    list_config["error_count"] = len(errors) - total_fixed
+                    save_monitor_config(config)
+            
+            input("Press Enter to continue...")
+        
+        elif choice == "5":
+            # Remove duplicates
+            duplicates = find_duplicate_entries_ultrafast(full_path)
+            if not duplicates:
+                print("✅ No duplicates found!")
+            else:
+                duplicate_count = sum(len(occurrences) - 1 for occurrences in duplicates.values())
+                print(f"⚠️ Found {duplicate_count} duplicate entries across {len(duplicates)} titles")
+                
+                if input(f"Remove {duplicate_count} duplicates? (y/N): ").lower() == 'y':
+                    lines_to_keep = set()
+                    for title, occurrences in duplicates.items():
+                        best_line = select_best_duplicate_line(occurrences)
+                        lines_to_keep.add(best_line["line_num"])
+                    
+                    # Also keep non-duplicate lines
+                    with open(full_path, "r", encoding="utf-8") as f:
+                        for i, line in enumerate(f, 1):
+                            is_duplicate = False
+                            for title, occurrences in duplicates.items():
+                                if i in [occ["line_num"] for occ in occurrences]:
+                                    is_duplicate = True
+                                    break
+                            if not is_duplicate:
+                                lines_to_keep.add(i)
+                    
+                    if remove_duplicate_lines(full_path, lines_to_keep):
+                        print(f"✅ Removed {duplicate_count} duplicate entries")
+                        # Update duplicate count in config
+                        list_config["duplicate_count"] = 0
+                        save_monitor_config(config)
+            
+            input("Press Enter to continue...")
+            
+        elif choice == "6":
+            # Edit errors one by one
+            edit_errors_one_by_one(list_path)
+            # Update error count in config
+            errors = find_error_entries(full_path)
+            list_config["error_count"] = len(errors)
+            save_monitor_config(config)
+            input("Press Enter to continue...")
+        
+        elif choice == "7":
+            return
+        
+        else:
+            input("❌ Invalid option. Press Enter to continue...")
+
 def add_monitor_urls_from_file():
     """Add multiple URLs to monitor from a text file (one per line)"""
     clear_terminal()
@@ -2107,6 +2287,162 @@ def process_auto_fix_errors(errors, lines, file_path):
         print(f"✅ Fixed {total_fixed} errors: {cached_fixes} from cache, {api_success_count} from TMDB API")
     
     return total_fixed
+
+def edit_errors_one_by_one(filepath):
+    """
+    Edit error entries one by one, with options to manually fix, skip, or delete each entry.
+    
+    Args:
+        filepath: Path to the file containing error entries
+    """
+    full_path = get_output_filepath(filepath)
+    if not os.path.exists(full_path):
+        print(f"❌ File not found: {full_path}")
+        return 0
+        
+    print(f"🔍 Scanning for errors in {filepath}...")
+    errors = find_error_entries(full_path)
+    
+    if not errors:
+        print("✅ No errors found!")
+        return 0
+        
+    print(f"⚠️ Found {len(errors)} error entries")
+    
+    # Read the entire file
+    with open(full_path, "r", encoding="utf-8") as f:
+        lines = f.readlines()
+    
+    fixed_count = 0
+    deleted_count = 0
+    
+    print("\n🔧 Starting line-by-line error editing")
+    print("For each error, you can:")
+    print("- Enter 'a' to attempt automatic fix")
+    print("- Enter 'm' for manual TMDB search")
+    print("- Enter 'e' to manually edit the line")
+    print("- Enter 'd' to delete the line")
+    print("- Enter 's' to skip this error")
+    print("- Enter 'q' to quit editing")
+    
+    for i, error in enumerate(errors):
+        line_num = error["line_num"]
+        title = error["title"]
+        line = lines[line_num - 1].strip()
+        
+        print(f"\n[{i+1}/{len(errors)}] Error at line {line_num}:")
+        print(f"Title: {title}")
+        print(f"Current line: {line}")
+        
+        action = input("\nAction (a/m/e/d/s/q): ").lower()
+        
+        if action == 'q':
+            print("⏹️ Editing stopped")
+            break
+            
+        elif action == 's':
+            print("⏭️ Skipping this error")
+            continue
+            
+        elif action == 'a':
+            print("🔄 Attempting automatic fix...")
+            # Try to match with TMDB
+            result = match_title_with_tmdb(title)
+            
+            if isinstance(result, dict):
+                # Successfully matched
+                year_str = f" ({result['year']})" if result.get('year') else ""
+                
+                if result.get('type') == 'movie':
+                    new_line = f"{title}{year_str} [movie:{result['id']}]\n"
+                else:
+                    new_line = f"{title}{year_str} [{result['id']}]\n"
+                
+                lines[line_num - 1] = new_line
+                print(f"✅ Auto-fixed: {new_line.strip()}")
+                fixed_count += 1
+            else:
+                print("❌ Automatic fix failed")
+        
+        elif action == 'm':
+            print(f"🔍 Searching TMDB for '{title}'...")
+            
+            # Try movie search first
+            print("Searching movies...")
+            movie_result = search_tmdb_media(title, "movie")
+            
+            if movie_result != "[Error]":
+                print(f"✅ Found movie match:")
+                print(f"ID: {movie_result['id']}")
+                print(f"Year: {movie_result.get('year', 'N/A')}")
+                
+                if input("Use this match? (Y/n): ").lower() != 'n':
+                    year_str = f" ({movie_result['year']})" if movie_result.get('year') else ""
+                    new_line = f"{title}{year_str} [movie:{movie_result['id']}]\n"
+                    lines[line_num - 1] = new_line
+                    print(f"✅ Fixed: {new_line.strip()}")
+                    fixed_count += 1
+                    continue
+            else:
+                print("❌ No movie match found")
+            
+            # Try TV show search
+            print("\nSearching TV shows...")
+            tv_result = search_tmdb_media(title, "tv")
+            
+            if tv_result != "[Error]":
+                print(f"✅ Found TV show match:")
+                print(f"ID: {tv_result['id']}")
+                print(f"Year: {tv_result.get('year', 'N/A')}")
+                
+                if input("Use this match? (Y/n): ").lower() != 'n':
+                    year_str = f" ({tv_result['year']})" if tv_result.get('year') else ""
+                    new_line = f"{title}{year_str} [{tv_result['id']}]\n"
+                    lines[line_num - 1] = new_line
+                    print(f"✅ Fixed: {new_line.strip()}")
+                    fixed_count += 1
+                    continue
+            else:
+                print("❌ No TV show match found")
+                
+            print("⚠️ No suitable match found")
+        
+        elif action == 'e':
+            print("✏️ Manual edit mode")
+            print("Enter the new line (leave empty to keep current):")
+            new_line = input().strip()
+            
+            if new_line:
+                lines[line_num - 1] = new_line + "\n"
+                print(f"✅ Line updated: {new_line}")
+                fixed_count += 1
+        
+        elif action == 'd':
+            if input(f"Are you sure you want to delete '{title}'? (y/N): ").lower() == 'y':
+                # Mark the line for deletion by setting it to an empty string
+                lines[line_num - 1] = ""
+                print("🗑️ Line marked for deletion")
+                deleted_count += 1
+            else:
+                print("❌ Deletion canceled")
+    
+    # Remove empty lines (deleted entries)
+    lines = [line for line in lines if line.strip()]
+    
+    # Write the changes back to the file
+    with open(full_path, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    
+    print(f"\n✅ Editing complete: {fixed_count} errors fixed, {deleted_count} entries deleted")
+    
+    # Update monitored lists config if applicable
+    config = load_monitor_config()
+    if filepath in config.get("monitored_lists", {}):
+        remaining_errors = len(errors) - fixed_count - deleted_count
+        config["monitored_lists"][filepath]["error_count"] = remaining_errors
+        save_monitor_config(config)
+        
+    return fixed_count + deleted_count
 
 def fix_errors_menu():
     """Menu for fixing errors in list files"""
