@@ -2,6 +2,8 @@
 
 A powerful tool for scraping and managing movie and TV show lists from popular websites like Trakt, Letterboxd, and MDBList.
 
+<a href="https://wakatime.com/badge/github/amcgready/Parsely"><img src="https://wakatime.com/badge/github/amcgready/Parsely.svg" alt="wakatime"></a>
+
 ## 📋 Overview
 
 Parsely helps you collect and organize movie and TV show titles from various online sources, automatically match them with TMDB (The Movie Database) information, and maintain clean, deduplicated lists for your media collection.
